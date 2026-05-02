@@ -144,7 +144,7 @@ def emit_function(rom: bytes, bank: int, start: int,
             for (lo, hi) in exclude_ranges:
                 if lo <= tpc < hi:
                     return (
-                        f"{prefix}return; "
+                        f"{prefix}return RECOMP_RETURN_NORMAL; "
                         f"/* {label} HLE-replaced "
                         f"(cfg exclude_range {lo:04X}-{hi:04X}) */"
                     )
@@ -171,7 +171,7 @@ def emit_function(rom: bytes, bank: int, start: int,
         # that scans for `unresolvable cross-fn`. Auto-promote is NOT
         # invoked.
         return (
-            f"{prefix}return; "
+            f"{prefix}return RECOMP_RETURN_NORMAL; "
             f"/* {label} unresolvable cross-fn goto — "
             f"target outside this bank's import range */"
         )
@@ -201,7 +201,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                     if len(succs) >= 1:
                         lines.append(_goto_or_return(succs[0]))
                     else:
-                        lines.append(f"return; /* Goto with no successor */")
+                        lines.append(f"return RECOMP_RETURN_NORMAL; /* Goto with no successor */")
                     block_terminated = True
                 elif isinstance(op, Return):
                     for ln in emit_op(op):
@@ -210,7 +210,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                 elif isinstance(op, IndirectGoto):
                     for ln in emit_op(op):
                         lines.append(ln)
-                    lines.append("return; /* IndirectGoto: dispatch table */")
+                    lines.append("return RECOMP_RETURN_NORMAL; /* IndirectGoto: dispatch table */")
                     block_terminated = True
                 elif isinstance(op, Call):
                     # Dispatch-helper JSL: the decoder marked the insn
@@ -243,12 +243,12 @@ def emit_function(rom: bytes, bank: int, start: int,
             if len(succs) >= 1:
                 lines.append(_goto_or_return(succs[0]) + " /* implicit fall-through */")
             else:
-                lines.append("return; /* no terminator, no successor */")
+                lines.append("return RECOMP_RETURN_NORMAL; /* no terminator, no successor */")
         block_lines[key] = lines
 
     # Compose the function source with labels per block.
     src: List[str] = []
-    src.append(f"void {func_name}(CpuState *cpu) {{")
+    src.append(f"RecompReturn {func_name}(CpuState *cpu) {{")
     # Diagnostics — same call-stack plumbing v1 emitted, so the runtime
     # debug_server's `call_stack` cmd and crash-handler attribution work.
     src.append(f'  extern const char *g_last_recomp_func;')
@@ -277,7 +277,7 @@ def emit_function(rom: bytes, bank: int, start: int,
     # Defensive trailing return so a missing terminator doesn't fall off
     # the end of the function in the C compiler's view.
     src.append("  RecompStackPop();")
-    src.append("  return;")
+    src.append("  return RECOMP_RETURN_NORMAL;")
     src.append("}")
     return "\n".join(src) + "\n"
 

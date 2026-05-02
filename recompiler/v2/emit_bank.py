@@ -81,7 +81,7 @@ def emit_bank(rom: bytes, bank: int,
     for entry in entries:
         base = entry.name or _default_func_name_local(bank, entry.start)
         suffix = _variant_suffix(entry.entry_m, entry.entry_x)
-        parts.append(f"void {base}{suffix}(CpuState *cpu);")
+        parts.append(f"RecompReturn {base}{suffix}(CpuState *cpu);")
     parts.append("")
 
     for entry in entries:
@@ -106,6 +106,12 @@ def emit_bank(rom: bytes, bank: int,
     # entry for that name. If a function has multiple (m,x) variants
     # only one alias is emitted (the cfg-default); other variants are
     # reachable only through gen-emitted Call ops that mangle names.
+    # Aliases stay `void` for ABI compatibility with hand-written
+    # callers (smw_rtl.c calls `I_RESET(&g_cpu)` etc.). They abort
+    # loudly if a non-NORMAL RecompReturn propagates up to the v2
+    # boundary — that would mean a SKIP_N idiom leaked past the v2
+    # region into hand-written code, which is a design violation
+    # worth crashing on.
     aliased: set = set()
     for entry in entries:
         if not entry.name:
@@ -115,7 +121,15 @@ def emit_bank(rom: bytes, bank: int,
         suffix = _variant_suffix(entry.entry_m, entry.entry_x)
         aliased.add(entry.name)
         parts.append(
-            f"void {entry.name}(CpuState *cpu) {{ {entry.name}{suffix}(cpu); }}"
+            f"void {entry.name}(CpuState *cpu) {{\n"
+            f"  RecompReturn _r = {entry.name}{suffix}(cpu);\n"
+            f"  if (_r != RECOMP_RETURN_NORMAL) {{\n"
+            f"    fprintf(stderr,\n"
+            f"      \"[recomp] non-local-return SKIP_%d leaked past void alias %s\\n\",\n"
+            f"      (int)_r, \"{entry.name}\");\n"
+            f"    abort();\n"
+            f"  }}\n"
+            f"}}"
         )
     if aliased:
         parts.append("")
@@ -142,7 +156,11 @@ def _default_file_header(bank: int) -> str:
  * cpu_read{{8,16}} / cpu_write{{8,16}} helpers in cpu_state.h.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "cpu_state.h"
 #include "cpu_trace.h"
+#include "common_cpu_infra.h"
 #include "funcs.h"
 """

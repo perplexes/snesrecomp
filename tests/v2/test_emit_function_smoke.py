@@ -9,15 +9,16 @@ from v2.emit_function import emit_function  # noqa: E402
 def test_linear_function_signature_and_return():
     """A trivial LDA #$05; STA $00; RTS function.
 
-    Expected shape:
-        void bank_00_8000(CpuState *cpu) {
+    Expected shape (post-RecompReturn ABI 2026-05-02):
+        RecompReturn bank_00_8000_M1X1(CpuState *cpu) {
           L_8000_M1X1:
             uint8 _v1 = 0x5;
             cpu->A = _v1;
             uint16 _v2 = (uint16)cpu->A;
             cpu_write8(cpu, 0x7E, ..., _v2);
-            return; /* RTS */
-          return;
+            { uint8 _ps = cpu->pending_skip; cpu->pending_skip = 0;
+              return (RecompReturn)_ps; /* RTS */ }
+          return RECOMP_RETURN_NORMAL;
         }
     """
     rom = make_lorom_bank0({
@@ -25,11 +26,13 @@ def test_linear_function_signature_and_return():
     })
     src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=1)
 
-    assert "void bank_00_8000(CpuState *cpu)" in src
+    assert "RecompReturn bank_00_8000_M1X1(CpuState *cpu)" in src
     assert "L_8000_M1X1:" in src
     assert "cpu->A" in src
     assert "cpu_write8" in src
-    assert "return;" in src
+    # Function returns RecompReturn — Return ops consume pending_skip;
+    # exit-via-fallback returns NORMAL directly.
+    assert "return (RecompReturn)" in src or "return RECOMP_RETURN_NORMAL" in src
 
 
 def test_cond_branch_emits_label_targets():
@@ -82,7 +85,8 @@ def test_function_body_is_brace_balanced():
 
 
 def test_jsr_emits_function_call():
-    """JSR $8010 -> emits bank_00_8010(cpu);"""
+    """JSR $8010 -> emits RecompReturn _r = bank_00_8010_M1X1(cpu);
+    + skip-propagation block (RecompReturn ABI 2026-05-02)."""
     rom = make_lorom_bank0({
         0x8000: bytes([
             0x20, 0x10, 0x80,   # JSR $8010
@@ -91,7 +95,9 @@ def test_jsr_emits_function_call():
         0x8010: bytes([0x60]),  # RTS at $8010 (callee body — discovered as part of decode? no: JSR doesn't follow into the callee in v2 decoder, target is opaque)
     })
     src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=1)
-    assert "bank_00_8010(cpu);" in src
+    assert "bank_00_8010_M1X1(cpu)" in src
+    assert "RecompReturn _r =" in src
+    assert "RECOMP_RETURN_NORMAL" in src
 
 
 def test_alu_emits_carry_chain_for_adc():

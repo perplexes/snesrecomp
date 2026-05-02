@@ -760,7 +760,7 @@ def _emit_dispatch(insn) -> List[str]:
     lines = ["{ /* JSL dispatch — short=2B / long=3B table */"]
     lines.append(f"  static const uint16 _disp_n = {n};")
     lines.append(f"  uint16 _idx = (uint16){widths.masked('cpu->A', 1)};")
-    lines.append("  if (_idx >= _disp_n) { return; /* dispatch OOB */ }")
+    lines.append("  if (_idx >= _disp_n) { return RECOMP_RETURN_NORMAL; /* dispatch OOB */ }")
     lines.append("  switch (_idx) {")
     for i, e in enumerate(entries):
         if e == 0:
@@ -780,13 +780,21 @@ def _emit_dispatch(insn) -> List[str]:
         # Record demand for both resolved and synthetic targets.
         _UNRESOLVED_CALL_TARGETS.add((tgt_addr, em, ex))
         name = f"{base_name}{suffix}"
-        # Single-line case body: join the 6 PB-save/restore statements
-        # with spaces so the switch case stays readable in the gen.
+        # Multi-line case body: emit each statement on its own line so
+        # the per-line scanner in emit_function.py can auto-inject
+        # RecompStackPop() before any line starting with "return"
+        # (the SKIP propagation block inside call_with_pb_save).
+        # Single-line emit silently dropped the RecompStackPop on NLR
+        # paths through the dispatcher — caught by GameMode oscillation
+        # at boot 2026-05-02.
         env = emitter_helpers.call_with_pb_save(target_bank, name)
-        lines.append(f"    case {i}: {{ {' '.join(env)} }} break;")
+        lines.append(f"    case {i}: {{")
+        for stmt in env:
+            lines.append(f"      {stmt}")
+        lines.append("    } break;")
     lines.append("    default: break;")
     lines.append("  }")
-    lines.append("  return; /* dispatch is a terminator */")
+    lines.append("  return RECOMP_RETURN_NORMAL; /* dispatch is a terminator */")
     lines.append("}")
     return lines
 
@@ -808,25 +816,51 @@ def _emit_call(op: Call) -> List[str]:
     _UNRESOLVED_CALL_TARGETS.add((addr, op.entry_m & 1, op.entry_x & 1))
     name = f"{base_name}{suffix}"
     target_bank = (addr >> 16) & 0xFF
+    # RecompReturn ABI: every callsite captures the callee's return
+    # status. NORMAL → continue. SKIP_N → emit `return SKIP_(N-1)` so
+    # the non-local-return propagates one C call frame upward (mirrors
+    # the asm idiom where extra PLA's discarded JSR return PCs and the
+    # following RTS skipped past one or more callers).
     if op.long:
-        # JSL: real hardware sets PB to the target bank for the call's
-        # duration, then RTL restores it. Emit explicit PB save/restore
-        # so PHK inside the callee pushes the CORRECT bank — without
-        # this, PHK; PLB inside a JSL'd function poisons DB to the
-        # CALLER's bank instead of the callee's (= currently $00 always).
+        # JSL: bank save+restore wraps the call. Propagation block goes
+        # AFTER the PB restore so the caller's PB is correct on the
+        # SKIP_N return path too.
         env = emitter_helpers.call_with_pb_save(target_bank, name)
         return ["{"] + [f"  {s}" for s in env] + ["}"]
     # JSR: same-bank short call. PB doesn't change.
-    return [f"{name}(cpu);"]
+    # NB: emit_function.py's per-line scanner auto-injects a
+    # RecompStackPop() before any line whose stripped text starts with
+    # "return" — that includes the SKIP propagation `return` below.
+    return [
+        "{",
+        f"  RecompReturn _r = {name}(cpu);",
+        "  if (_r != RECOMP_RETURN_NORMAL) {",
+        "    cpu_trace_event(cpu, 0, CPU_TR_NLR_PROPAGATE, (uint8)_r, 0);",
+        "    return (RecompReturn)((int)_r - 1);",
+        "  }",
+        "}",
+    ]
 
 
 def _emit_return(op: Return) -> List[str]:
+    """RTS / RTL / RTI emit. Reads + clears cpu->pending_skip (set by
+    an upstream NLR-pattern block on the same path) and returns its
+    value. NORMAL paths get pending_skip == 0 == RECOMP_RETURN_NORMAL.
+
+    The `return ...;` line stays at the start of its line so the
+    per-line scanner in emit_function.py auto-injects RecompStackPop()
+    before it. Wrapped in {} so `_ps` is local-scoped."""
     if op.interrupt:
         return [
             "cpu_trace_event(cpu, 0, CPU_TR_RTI, 0, 0);",
-            "return; /* RTI */",
+            "{ uint8 _ps = cpu->pending_skip; cpu->pending_skip = 0;",
+            "  return (RecompReturn)_ps; /* RTI */ }",
         ]
-    return ["return; /* RTL */" if op.long else "return; /* RTS */"]
+    label = "/* RTL */" if op.long else "/* RTS */"
+    return [
+        "{ uint8 _ps = cpu->pending_skip; cpu->pending_skip = 0;",
+        f"  return (RecompReturn)_ps; {label} }}",
+    ]
 
 
 def _emit_stop(op: Stop) -> List[str]:

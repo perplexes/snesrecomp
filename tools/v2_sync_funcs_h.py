@@ -82,13 +82,17 @@ def emit_funcs_h(items: list) -> str:
     lines.append('')
     lines.append(f'/* {len(items)} functions across all banks (5 decls each). */')
     lines.append('')
+    # Bare-named alias keeps `void` ABI for hand-written callers
+    # outside the v2 region. Each variant returns RecompReturn so
+    # the SKIP_N non-local-return signal propagates cleanly through
+    # the v2 call graph (see RecompReturn enum in cpu_state.h).
     for (name, addr) in items:
         bank = (addr >> 16) & 0xFF
         pc = addr & 0xFFFF
         lines.append(f'void {name}(CpuState *cpu);  /* ${bank:02X}:{pc:04X} alias */')
         for em in (0, 1):
             for ex in (0, 1):
-                lines.append(f'void {name}_M{em}X{ex}(CpuState *cpu);')
+                lines.append(f'RecompReturn {name}_M{em}X{ex}(CpuState *cpu);')
     lines.append('')
     return '\n'.join(lines)
 

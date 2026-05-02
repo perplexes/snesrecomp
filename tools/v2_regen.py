@@ -457,7 +457,8 @@ def main() -> int:
         for bank in sorted(by_bank):
             for pc, em, ex in sorted(by_bank[bank]):
                 lines.append(
-                    f'void bank_{bank:02X}_{pc:04X}_M{em}X{ex}(CpuState *cpu) {{ (void)cpu; }}'
+                    f'RecompReturn bank_{bank:02X}_{pc:04X}_M{em}X{ex}(CpuState *cpu) '
+                    f'{{ (void)cpu; return RECOMP_RETURN_NORMAL; }}'
                 )
                 total_stubs += 1
         stub_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')

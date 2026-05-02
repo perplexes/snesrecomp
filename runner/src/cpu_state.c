@@ -174,5 +174,6 @@ void cpu_state_init(CpuState *cpu, uint8 *ram) {
     cpu->_flag_C = 0;
     cpu->_flag_I = 1;
     cpu->_flag_D = 0;
+    cpu->pending_skip = 0;  /* RECOMP_RETURN_NORMAL */
     cpu->ram = ram;
 }

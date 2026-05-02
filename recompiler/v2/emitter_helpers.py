@@ -113,30 +113,34 @@ def modify_p_via_mirrors(mask: int, kind: str) -> List[str]:
 
 
 def call_with_pb_save(target_bank: int, callee_name: str) -> List[str]:
-    """Emit the 6-statement JSL bank-save/restore envelope as a list
-    of raw C statements (no indentation). Caller is responsible for
-    indent / brace wrapping / single-line concatenation as needed.
+    """Emit the JSL bank-save/restore envelope as a list of raw C
+    statements (no indentation). Caller is responsible for indent /
+    brace wrapping as needed.
 
-    Statements:
-      1. uint8 _saved_pb = cpu->PB;
-      2. cpu_trace_pb_change(JSL, _saved_pb -> target_bank);
-      3. cpu->PB = target_bank;
-      4. {callee_name}(cpu);
-      5. cpu_trace_pb_change(RTL, cpu->PB -> _saved_pb);
-      6. cpu->PB = _saved_pb;
+    Real 65816 hardware sets PB to the target bank for the call's
+    duration, then RTL restores it. PHK inside the callee must push
+    the CALLEE's bank, not the caller's — without the explicit save
+    and restore, inner PHK/PLB sequences poison DB to bank $00.
 
-    Why all 6: real 65816 hardware sets PB to the target bank for
-    the call's duration, then RTL restores it. PHK inside the callee
-    must push the CALLEE's bank, not the caller's — without (3) and
-    (6), inner PHK/PLB sequences poison DB to bank $00. The two trace
-    calls let the trace ring distinguish enter/exit transitions of
-    PB; without them the trace can't reconstruct nested call chains.
+    RecompReturn ABI (2026-05-02): callee returns RecompReturn.
+    NORMAL → continue. SKIP_N → restore PB, then propagate via
+    `return SKIP_(N-1)`. PB restore MUST run before the propagation
+    return so the caller's PB is correct on the way out.
+
+    NB: emit_function.py's per-line scanner auto-injects
+    RecompStackPop() before any line whose stripped text starts with
+    "return" — that catches the propagation `return` here without an
+    explicit pop (which would double-pop).
     """
     return [
         "uint8 _saved_pb = cpu->PB;",
         f"cpu_trace_pb_change(cpu, 0, _saved_pb, {target_bank:#04x}, CPU_TR_JSL);",
         f"cpu->PB = {target_bank:#04x};",
-        f"{callee_name}(cpu);",
+        f"RecompReturn _r = {callee_name}(cpu);",
         f"cpu_trace_pb_change(cpu, 0, cpu->PB, _saved_pb, CPU_TR_RTL);",
         "cpu->PB = _saved_pb;",
+        "if (_r != RECOMP_RETURN_NORMAL) {",
+        "  cpu_trace_event(cpu, 0, CPU_TR_NLR_PROPAGATE, (uint8)_r, 0);",
+        "  return (RecompReturn)((int)_r - 1);",
+        "}",
     ]

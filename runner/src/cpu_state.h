@@ -79,6 +79,23 @@ typedef struct CpuState {
      * issue cpu_readN / cpu_writeN against this pointer so DB / D / S
      * / PB-relative addressing all resolve through the cpu_ helpers. */
     uint8 *ram;
+
+    /* Pending non-local-return skip count. Set by NLR-pattern blocks
+     * (the asm "PLA*N before fall-through to RTS" idiom — see
+     * RecompReturn enum above) and consumed by the next RTS/RTL emit
+     * site, which returns it instead of RECOMP_RETURN_NORMAL.
+     *
+     * The NLR block must NOT do the literal PLAs (those would consume
+     * ancestor data on the simulated SNES stack since v2 doesn't push
+     * return-PC bytes). Instead the block stores the skip count here
+     * and falls through to the successor block, which runs its real
+     * work normally and reaches the RTS — where pending_skip is read
+     * and reset.
+     *
+     * Stored as uint8 (cast to RecompReturn) so the field placement
+     * doesn't depend on enum-type layout. Init to 0 (NORMAL) by
+     * cpu_state_init. */
+    uint8 pending_skip;
 } CpuState;
 
 /* Read the B byte of the 16-bit accumulator. Always equals the high
@@ -89,6 +106,41 @@ typedef struct CpuState {
 static inline uint8 cpu_read_b(const CpuState *cpu) {
     return (uint8)((cpu->A >> 8) & 0xFF);
 }
+
+/* ── Non-local return signaling ────────────────────────────────────────
+ *
+ * Some 65816 functions implement "return-to-grandparent" via the
+ * stack-discard idiom:
+ *     PLA          ; pop own JSR return PC low
+ *     PLA          ; pop own JSR return PC high
+ *     ...          ; (or 3 PLAs for JSL/RTL)
+ *     RTS          ; now pops grandparent's return PC
+ *
+ * In v2 codegen, JSR/JSL/RTS/RTL don't push or pop return-PC bytes on
+ * the simulated SNES stack — those are tracked purely via C call
+ * frames. So translating PLA literally as `cpu->S += 1; A = ram[S]`
+ * would consume bytes that belong to AN ANCESTOR'S stack frame and
+ * leave the SNES S register drifted (root cause of "DB=$C0 at
+ * ProcessGameMode entry" 2026-05-02).
+ *
+ * Instead, the v2 ABI returns a small enum: NORMAL means "RTS to
+ * immediate caller"; SKIP_N means "skip N additional levels of C
+ * return" (i.e., the asm RTS would have unwound past N JSR frames).
+ *
+ * Callsite contract (emitted by codegen):
+ *     RecompReturn _r = Callee(cpu);
+ *     if (_r != RECOMP_RETURN_NORMAL) {
+ *         return (RecompReturn)((int)_r - 1);
+ *     }
+ *
+ * SKIP_N is set by NLR-pattern blocks via `cpu->pending_skip` (below);
+ * the next Return op consumes it. */
+typedef enum RecompReturn {
+    RECOMP_RETURN_NORMAL = 0,
+    RECOMP_RETURN_SKIP_1 = 1,
+    RECOMP_RETURN_SKIP_2 = 2,
+    RECOMP_RETURN_SKIP_3 = 3,
+} RecompReturn;
 
 /* ── Typed register access ────────────────────────────────────────────────
  *

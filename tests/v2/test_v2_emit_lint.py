@@ -64,7 +64,16 @@ HIDDEN_REGS = {
     'emulation',
 }
 
-ALLOWED = CANONICAL | SHADOWS_FROM_P | HIDDEN_REGS
+# Recompiler-only state: not part of the 65816 architecture but used by
+# the v2 C ABI. `pending_skip` threads non-local-return signaling
+# across call frames — set by NLR-pattern blocks (PLA*N + RTS idiom),
+# consumed by the next Return op. See RecompReturn enum in cpu_state.h
+# and project_first_db_corruption_root_2026_05_02 in memory.
+ABI_STATE = {
+    'pending_skip',
+}
+
+ALLOWED = CANONICAL | SHADOWS_FROM_P | HIDDEN_REGS | ABI_STATE
 
 
 # Fields that were once present and have since been deleted as
