@@ -307,7 +307,9 @@ def emit_function(rom: bytes, bank: int, start: int,
                 f"(uint8){skip}, 0); /* PLA*N + RTS = "
                 f"return-to-grandparent via SKIP_{skip} */"
             )
-            lines.append(f"cpu->pending_skip = (uint8)RECOMP_RETURN_SKIP_{skip};")
+            # Function-local — NOT cpu->pending_skip. See declaration
+            # in the function prologue for design rationale.
+            lines.append(f"_pending_skip = RECOMP_RETURN_SKIP_{skip};")
             # Non-rotating pending_skip-write counter + first-writer
             # forensics (frame, PC, function name).
             lines.append(
@@ -412,6 +414,19 @@ def emit_function(rom: bytes, bank: int, start: int,
     # Trace ring: function entry (carries name hash) — first entry per call.
     fn_entry_pc = (bank << 16) | (start & 0xFFFF)
     src.append(f'  cpu_trace_func_entry(cpu, 0x{fn_entry_pc:06X}, "{func_name}");')
+    # Function-local NLR pending-skip — NOT cpu state. NLR-pattern blocks
+    # set this before fall-through to the Return-terminated successor;
+    # the Return op reads + clears it. Local-scoped so:
+    #   1. NLR signaling is C control-flow state, not 65816 hardware
+    #      state — no reason to keep it on CpuState.
+    #   2. The optimizer can keep it in a register; no aliasing
+    #      concerns through the cpu pointer.
+    #   3. Different generated functions can't see each other's
+    #      in-flight NLR state.
+    # Preceded by a `(void)` cast so the C compiler doesn't warn when
+    # NLR detection didn't fire on this function (most functions).
+    src.append(f'  RecompReturn _pending_skip = RECOMP_RETURN_NORMAL;')
+    src.append(f'  (void)_pending_skip;  /* unused if no NLR site in this fn */')
     for i, key in enumerate(block_order):
         src.append(f"  {_label_for(key)}:")
         # Trace block entry — gives us the SNES PC chain in the trace ring.

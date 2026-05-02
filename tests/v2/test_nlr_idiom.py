@@ -28,7 +28,10 @@ def test_single_block_pla_pla_rts_emits_skip_1():
     assert "RECOMP_RETURN_SKIP_1" in src, (
         f"expected SKIP_1 emit for PLA/PLA/RTS idiom; src=\n{src}"
     )
-    assert "cpu->pending_skip" in src
+    # Function-LOCAL `_pending_skip`, not `cpu->pending_skip`.
+    # NLR signaling is C control-flow state, not 65816 hardware state.
+    assert "_pending_skip = RECOMP_RETURN_SKIP_1" in src
+    assert "cpu->pending_skip" not in src
     assert "CPU_TR_NLR_DETECT" in src
     # Literal PLA semantics (cpu_read8 of stack into A) MUST NOT
     # appear in the NLR block — would consume ancestor stack data.
@@ -73,7 +76,8 @@ def test_multi_block_bne_to_pla_pla_then_work_then_rts():
     assert "RECOMP_RETURN_SKIP_1" in src, (
         f"expected SKIP_1 emit for multi-block PLA*N idiom; src=\n{src}"
     )
-    assert "cpu->pending_skip" in src
+    assert "_pending_skip = RECOMP_RETURN_SKIP_1" in src
+    assert "cpu->pending_skip" not in src
     assert "CPU_TR_NLR_DETECT" in src
     assert "cpu_read8(cpu, 0x00, cpu->S);" not in src, (
         f"NLR multi-block path leaked a literal PLA read\n{src}"
