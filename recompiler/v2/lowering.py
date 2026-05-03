@@ -350,8 +350,14 @@ def _h_jsr(insn, vf):
     em = getattr(insn, 'm_flag', 1)
     ex = getattr(insn, 'x_flag', 1)
     if insn.mode == INDIR_X:
+        # Stamp source PC + table-base operand on the IR so the
+        # comment-only emit (and cf_debt_report.py) can identify each
+        # site. insn.addr is 24-bit bank-encoded; insn.operand is the
+        # 16-bit table base for JSR (abs,X).
         return [Call(target=None, long=False, indirect=True,
-                     entry_m=em, entry_x=ex)]
+                     entry_m=em, entry_x=ex,
+                     source_pc24=insn.addr & 0xFFFFFF,
+                     table_base=insn.operand & 0xFFFF)]
     # JSR is a same-bank short call; insn.operand is the 16-bit local PC.
     # Combine with the source bank from insn.addr so codegen can resolve
     # the cross-bank call name (e.g. bank_0C_944C, not bank_00_944C).

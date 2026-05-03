@@ -833,6 +833,15 @@ def _emit_dispatch(insn) -> List[str]:
 
 def _emit_call(op: Call) -> List[str]:
     if op.indirect:
+        # Comment-only emit until cfg-supplied dispatch tables land.
+        # Tag with the source PC and table-base operand so
+        # cf_debt_report.py can prioritise sites by reachability and
+        # so cfg authoring has the exact (site_pc, base) pair.
+        if op.source_pc24 is not None and op.table_base is not None:
+            return [
+                f"/* Call indirect: JSR (${op.table_base:04X},X) at "
+                f"${op.source_pc24:06X} — caller dispatches */"
+            ]
         return ["/* Call indirect — caller dispatches */"]
     if op.target is None:
         return ["/* Call: target unknown — caller dispatches */"]

@@ -339,6 +339,13 @@ class Call(IROp):
     indirect: bool = False     # True for JSR (abs,X)
     entry_m: int = 1
     entry_x: int = 1
+    # JSR (abs,X) only — populated by lowering._h_jsr from the source
+    # Insn so the comment-only emit can record exact site PC + table
+    # operand (cf_debt_report.py reads these out of the generated text).
+    # None for non-indirect calls (target carries the resolved address
+    # in that case).
+    source_pc24: Optional[int] = None
+    table_base: Optional[int] = None
 
 
 @dataclass(frozen=True)

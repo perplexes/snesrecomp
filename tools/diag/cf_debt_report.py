@@ -61,7 +61,11 @@ RE_BLOCK_TRACE = re.compile(r'cpu_trace_block\s*\(\s*cpu\s*,\s*0x([0-9A-Fa-f]{6}
 # Marker patterns. Each captures a "site_type" and the human-readable
 # comment text. Using contains-string checks instead of regex where
 # possible — the markers are stable strings emitted by codegen.py.
+# CALL_INDIRECT now prefers the tagged shape (JSR ($XXXX,X) at $BB:PPPP);
+# the legacy bare comment is kept as a fallback for any pre-tag generated
+# files that haven't been regen'd yet.
 MARKERS: List[Tuple[str, str]] = [
+    ('CALL_INDIRECT',     '/* Call indirect: JSR ('),
     ('CALL_INDIRECT',     '/* Call indirect — caller dispatches */'),
     ('CALL_TARGET_UNK',   '/* Call: target unknown — caller dispatches */'),
     ('INDIRECT_GOTO',     '/* IndirectGoto:'),
@@ -70,6 +74,12 @@ MARKERS: List[Tuple[str, str]] = [
     ('STP',               '/* STP: halt — runtime hook */'),
     ('WAI',               '/* WAI: wait for interrupt — runtime hook */'),
 ]
+
+# Tagged CALL_INDIRECT shape:
+#   /* Call indirect: JSR ($XXXX,X) at $BBPPPP — caller dispatches */
+RE_CALL_INDIRECT_TAGGED = re.compile(
+    r'/\*\s*Call indirect:\s*JSR\s*\(\$([0-9A-Fa-f]{4}),X\)\s+at\s+\$([0-9A-Fa-f]{6})\s*'
+)
 
 # "Unresolvable cross-fn goto" appears inside a return-comment; we
 # match by substring rather than as a line-start marker because the
@@ -95,6 +105,11 @@ class Site:
     line: int
     function: Optional[str]
     comment: str
+    # CALL_INDIRECT-only: parsed from the tagged comment shape. Both
+    # are hex strings without `0x`/`$`. None for legacy untagged sites
+    # or non-indirect-call markers.
+    site_pc24: Optional[str] = None    # exact PC of the JSR (abs,X) insn
+    table_base: Optional[str] = None   # operand of the JSR (abs,X)
 
 
 def bank_from_filename(path: str) -> str:
@@ -164,7 +179,7 @@ def scan_file_for_markers(path: str) -> List[Site]:
             for site_type, needle in MARKERS:
                 if needle in stripped:
                     comment = stripped
-                    sites.append(Site(
+                    site = Site(
                         site_type=site_type,
                         bank=bank,
                         source_pc=last_pc,
@@ -172,7 +187,16 @@ def scan_file_for_markers(path: str) -> List[Site]:
                         line=lineno,
                         function=cur_func,
                         comment=comment,
-                    ))
+                    )
+                    # If this is a tagged CALL_INDIRECT, parse the
+                    # exact JSR site PC and table base out of the
+                    # comment so callers don't have to re-parse.
+                    if site_type == 'CALL_INDIRECT':
+                        mt = RE_CALL_INDIRECT_TAGGED.search(stripped)
+                        if mt:
+                            site.table_base = mt.group(1).upper()
+                            site.site_pc24 = mt.group(2).upper()
+                    sites.append(site)
                     break
 
             # Unresolvable cross-fn goto — return-line comment.
@@ -326,14 +350,33 @@ def format_detail(sites: List[Site], gen_dir: str) -> str:
         rows = by_type.get(st, [])
         if not rows:
             continue
-        rows.sort(key=lambda s: (s.bank, s.source_pc or '', s.file, s.line))
+        # CALL_INDIRECT: sort by exact site PC (site_pc24) when known,
+        # falling back to block-trace source_pc for legacy untagged
+        # entries. That groups sites within the same dispatcher loop
+        # together (e.g. all $00:EF93 hits across (m,x) variants).
+        if st == 'CALL_INDIRECT':
+            rows.sort(key=lambda s: (
+                s.bank,
+                s.site_pc24 or s.source_pc or '',
+                s.table_base or '',
+                s.file,
+                s.line,
+            ))
+        else:
+            rows.sort(key=lambda s: (s.bank, s.source_pc or '', s.file, s.line))
         out.append('')
         out.append(f'-- {st} ({len(rows)} sites) ' + '-' * (60 - len(st)))
         for s in rows:
             rel = os.path.relpath(s.file, gen_dir) if gen_dir else s.file
-            pc = f'$pc:{s.source_pc}' if s.source_pc else '$pc:??????'
             fn = s.function or '<top-level>'
-            out.append(f'  bank ${s.bank}  {pc}  {rel}:{s.line}  in {fn}')
+            if st == 'CALL_INDIRECT' and s.site_pc24:
+                out.append(
+                    f'  bank ${s.bank}  $pc:{s.site_pc24}  '
+                    f'JSR (${s.table_base},X)  {rel}:{s.line}  in {fn}'
+                )
+            else:
+                pc = f'$pc:{s.source_pc}' if s.source_pc else '$pc:??????'
+                out.append(f'  bank ${s.bank}  {pc}  {rel}:{s.line}  in {fn}')
             # Truncate long comments — IndirectGoto comments include
             # the resolution expression and can be 100+ chars.
             cmt = s.comment if len(s.comment) <= 140 else s.comment[:137] + '...'
