@@ -50,6 +50,44 @@ def addr24(bank: int, pc: int) -> int:
     return ((bank & 0xFF) << 16) | (pc & 0xFFFF)
 
 
+def _dispatch_target_is_padding(rom: bytes, bank: int, pc16: int,
+                                window: int = 16) -> bool:
+    """Return True iff the dispatch-table entry's target bytes look like
+    unmapped ROM padding (all $FF) or cleared region (all $00).
+
+    Used by the auto-detected dispatch-table reader to terminate a
+    table when an entry points into bytes that can't be the start of
+    any real handler. SMW's PLA/PLY-indirect-JMP dispatchers
+    occasionally have shorter true tables than the auto-detector reads
+    (the table's actual count is implicit in the asm code that loads
+    the index), and the trailing entries fall on data/padding bytes
+    that we then mistakenly auto-promote into phantom functions.
+
+    A target whose first 16 bytes are all $FF is in unmapped ROM
+    padding (between real ROM regions, post-end-of-bank, etc.). A
+    target whose first 16 bytes are all $00 is similarly suspect.
+    Real 65816 code at the target's entry point produces non-uniform
+    byte sequences (mix of opcodes + operands).
+
+    NOT a heuristic for code/data classification in general — only
+    used to STOP a dispatch table when an obviously-invalid entry is
+    encountered. Real code at the target falls through to the
+    standard accept path.
+    """
+    try:
+        off = lorom_offset(bank, pc16)
+    except AssertionError:
+        return True
+    if off + window > len(rom):
+        return True
+    blob = rom[off:off + window]
+    if all(b == 0xFF for b in blob):
+        return True
+    if all(b == 0x00 for b in blob):
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class DecodeKey:
     """Identifies a decoded instruction by 24-bit address + entry M/X.
@@ -453,6 +491,11 @@ def decode_function(rom: bytes, bank: int, start: int,
                         continue
                     if addr16 < 0x8000 or eb != bank:
                         break
+                    # Validity gate: stop the table if the entry points
+                    # into all-FF or all-00 bytes. See
+                    # `_dispatch_target_is_padding` doc.
+                    if _dispatch_target_is_padding(rom, eb, addr16):
+                        break
                     full_entry = (eb << 16) | addr16
                 else:
                     if addr16 == 0:
@@ -460,6 +503,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                         tbl_pc += entry_size
                         continue
                     if addr16 < 0x8000:
+                        break
+                    if _dispatch_target_is_padding(rom, bank, addr16):
                         break
                     full_entry = (bank << 16) | addr16
                 # NOTE: do NOT bound the entry value by the dispatching
