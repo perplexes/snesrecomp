@@ -62,6 +62,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                   *, end: Optional[int] = None,
                   func_name: Optional[str] = None,
                   dispatch_helpers=None,
+                  indirect_call_tables=None,
+                  suppressed_collector=None,
                   exclude_ranges: Optional[List[Tuple[int, int]]] = None) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
@@ -74,7 +76,12 @@ def emit_function(rom: bytes, bank: int, start: int,
         block-end op → goto / fall-through wiring
     """
     graph = decode_function(rom, bank, start, entry_m, entry_x, end=end,
-                            dispatch_helpers=dispatch_helpers)
+                            dispatch_helpers=dispatch_helpers,
+                            indirect_call_tables=indirect_call_tables)
+    # Forward any suppressed indirect calls upward so emit_bank can
+    # aggregate them into the build report. List-of-records.
+    if suppressed_collector is not None:
+        suppressed_collector.extend(graph.suppressed_indirect_calls)
     cfg = build_cfg(graph)
 
     if func_name is None:

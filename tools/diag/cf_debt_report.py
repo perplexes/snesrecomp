@@ -65,6 +65,10 @@ RE_BLOCK_TRACE = re.compile(r'cpu_trace_block\s*\(\s*cpu\s*,\s*0x([0-9A-Fa-f]{6}
 # the legacy bare comment is kept as a fallback for any pre-tag generated
 # files that haven't been regen'd yet.
 MARKERS: List[Tuple[str, str]] = [
+    # Order matters: SUPPRESSED variant must be checked BEFORE the
+    # plain CALL_INDIRECT since the substring `/* Call indirect:` is
+    # contained inside both.
+    ('CALL_INDIRECT_SUPPRESSED', '/* Call indirect SUPPRESSED'),
     ('CALL_INDIRECT',     '/* Call indirect: JSR ('),
     ('CALL_INDIRECT',     '/* Call indirect — caller dispatches */'),
     ('CALL_TARGET_UNK',   '/* Call: target unknown — caller dispatches */'),
@@ -78,7 +82,7 @@ MARKERS: List[Tuple[str, str]] = [
 # Tagged CALL_INDIRECT shape:
 #   /* Call indirect: JSR ($XXXX,X) at $BBPPPP — caller dispatches */
 RE_CALL_INDIRECT_TAGGED = re.compile(
-    r'/\*\s*Call indirect:\s*JSR\s*\(\$([0-9A-Fa-f]{4}),X\)\s+at\s+\$([0-9A-Fa-f]{6})\s*'
+    r'/\*\s*Call indirect(?:\s+SUPPRESSED)?:\s*JSR\s*\(\$([0-9A-Fa-f]{4}),X\)\s+at\s+\$([0-9A-Fa-f]{6})\s*'
 )
 
 # "Unresolvable cross-fn goto" appears inside a return-comment; we
@@ -188,10 +192,10 @@ def scan_file_for_markers(path: str) -> List[Site]:
                         function=cur_func,
                         comment=comment,
                     )
-                    # If this is a tagged CALL_INDIRECT, parse the
-                    # exact JSR site PC and table base out of the
-                    # comment so callers don't have to re-parse.
-                    if site_type == 'CALL_INDIRECT':
+                    # If this is a tagged CALL_INDIRECT(_SUPPRESSED),
+                    # parse the exact JSR site PC and table base out
+                    # of the comment so callers don't have to re-parse.
+                    if site_type in ('CALL_INDIRECT', 'CALL_INDIRECT_SUPPRESSED'):
                         mt = RE_CALL_INDIRECT_TAGGED.search(stripped)
                         if mt:
                             site.table_base = mt.group(1).upper()
@@ -308,6 +312,11 @@ def format_summary(sites: List[Site]) -> str:
         'COP',
         'STP',
         'WAI',
+        # Informational — not priority-1. SUPPRESSED sites are JSR
+        # (abs,X) decoder phantoms severed by cfg-required-dispatch-or-
+        # kill (2026-05-03). They ship loud-marker comments only; no
+        # runtime behaviour.
+        'CALL_INDIRECT_SUPPRESSED',
     ]
     for st in order:
         n = by_type.get(st, 0)
@@ -345,16 +354,21 @@ def format_detail(sites: List[Site], gen_dir: str) -> str:
         'COP',
         'STP',
         'WAI',
+        # Informational — not priority-1. SUPPRESSED sites are JSR
+        # (abs,X) decoder phantoms severed by cfg-required-dispatch-or-
+        # kill (2026-05-03). They ship loud-marker comments only; no
+        # runtime behaviour.
+        'CALL_INDIRECT_SUPPRESSED',
     ]
     for st in order:
         rows = by_type.get(st, [])
         if not rows:
             continue
-        # CALL_INDIRECT: sort by exact site PC (site_pc24) when known,
+        # CALL_INDIRECT(_SUPPRESSED): sort by exact site PC when known,
         # falling back to block-trace source_pc for legacy untagged
         # entries. That groups sites within the same dispatcher loop
         # together (e.g. all $00:EF93 hits across (m,x) variants).
-        if st == 'CALL_INDIRECT':
+        if st in ('CALL_INDIRECT', 'CALL_INDIRECT_SUPPRESSED'):
             rows.sort(key=lambda s: (
                 s.bank,
                 s.site_pc24 or s.source_pc or '',
@@ -369,7 +383,7 @@ def format_detail(sites: List[Site], gen_dir: str) -> str:
         for s in rows:
             rel = os.path.relpath(s.file, gen_dir) if gen_dir else s.file
             fn = s.function or '<top-level>'
-            if st == 'CALL_INDIRECT' and s.site_pc24:
+            if st in ('CALL_INDIRECT', 'CALL_INDIRECT_SUPPRESSED') and s.site_pc24:
                 out.append(
                     f'  bank ${s.bank}  $pc:{s.site_pc24}  '
                     f'JSR (${s.table_base},X)  {rel}:{s.line}  in {fn}'

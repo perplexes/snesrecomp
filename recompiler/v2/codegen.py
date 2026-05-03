@@ -833,16 +833,26 @@ def _emit_dispatch(insn) -> List[str]:
 
 def _emit_call(op: Call) -> List[str]:
     if op.indirect:
-        # Comment-only emit until cfg-supplied dispatch tables land.
-        # Tag with the source PC and table-base operand so
-        # cf_debt_report.py can prioritise sites by reachability and
-        # so cfg authoring has the exact (site_pc, base) pair.
+        # cfg-required-dispatch-or-kill (2026-05-03): JSR (abs,X) is
+        # ONLY emitted as a real dispatch when cfg has authorised it
+        # via an `indirect_call_table` directive. The decoder severs
+        # the fall-through edge when no authorisation exists — see
+        # decoder.SuppressedIndirectCall + the regression tests at
+        # tests/v2/test_decoder_smc_phantom_suppression.py.
+        #
+        # The IR Call op is still produced for the suppressed JSR
+        # (the predecessor block emits it as part of its lowering
+        # output), but no fall-through code follows. The comment text
+        # marks it as SUPPRESSED so cf_debt_report classifies it as a
+        # suppressed phantom rather than a missing-dispatch priority.
+        # Authorised JSR (abs,X) emit comes later (separate priority).
         if op.source_pc24 is not None and op.table_base is not None:
             return [
-                f"/* Call indirect: JSR (${op.table_base:04X},X) at "
-                f"${op.source_pc24:06X} — caller dispatches */"
+                f"/* Call indirect SUPPRESSED: JSR (${op.table_base:04X},X) at "
+                f"${op.source_pc24:06X} — cfg-required-dispatch-or-kill, "
+                f"no indirect_call_table authorisation */"
             ]
-        return ["/* Call indirect — caller dispatches */"]
+        return ["/* Call indirect SUPPRESSED — caller dispatches */"]
     if op.target is None:
         return ["/* Call: target unknown — caller dispatches */"]
     addr = op.target & 0xFFFFFF

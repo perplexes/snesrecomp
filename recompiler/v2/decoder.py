@@ -72,6 +72,31 @@ class DecodedInsn:
 
 
 @dataclass
+class SuppressedIndirectCall:
+    """Bookkeeping entry for a JSR (abs,X) site whose fall-through edge
+    was severed because cfg has no `indirect_call_table` directive
+    authorising it.
+
+    cfg-required-dispatch-or-kill rule (2026-05-03): the v2 decoder
+    refuses to follow the fall-through of an indirect JSR (a,X) when
+    cfg hasn't declared a static dispatch table for it. The insn is
+    still placed in the graph (so predecessors' successor edges
+    resolve), but with successors=[] — that severs the post-JSR
+    decode chain so phantom M=0 paths through SMW's SMC-dispatch byte
+    sequences don't pollute downstream codegen.
+
+    Each suppressed site is recorded here for the build report. Any
+    reach of `site_pc24` at runtime is caught by the always-armed
+    phantom-PC trap (runner/src/cpu_trace.c).
+    """
+    site_pc24: int
+    table_base: int
+    function_entry_pc24: int
+    entry_m: int
+    entry_x: int
+
+
+@dataclass
 class FunctionDecodeGraph:
     """Output of `decode_function` for one function entry.
 
@@ -81,9 +106,14 @@ class FunctionDecodeGraph:
             iff they have different `key.m` or `key.x` — that means the
             same PC was decoded twice, once per reaching mode-state, and
             both are preserved. (This is the central correctness fix.)
+        suppressed_indirect_calls: list of JSR (abs,X) sites whose
+            fall-through edge was severed because cfg has no
+            `indirect_call_table` authorisation. See class
+            SuppressedIndirectCall above.
     """
     entry: DecodeKey
     insns: Dict[DecodeKey, DecodedInsn] = field(default_factory=dict)
+    suppressed_indirect_calls: List[SuppressedIndirectCall] = field(default_factory=list)
 
     def keys_at_pc(self, pc24: int) -> List[DecodeKey]:
         """Return all DecodeKeys with this 24-bit PC (across entry mode states)."""
@@ -271,7 +301,9 @@ def decode_function(rom: bytes, bank: int, start: int,
                     entry_m: int, entry_x: int,
                     *, end: Optional[int] = None,
                     max_insns: int = 4000,
-                    dispatch_helpers: Optional[Dict[int, str]] = None) -> FunctionDecodeGraph:
+                    dispatch_helpers: Optional[Dict[int, str]] = None,
+                    indirect_call_tables: Optional[Dict[int, dict]] = None
+                    ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
     Worklist over DecodeKey tuples. Each key is decoded at most once;
@@ -287,6 +319,18 @@ def decode_function(rom: bytes, bank: int, start: int,
     AFTER the table (not at the JSL+length offset). Without this hook,
     SMW's "JSL Foo; .dw target0, target1, ..." pattern at $00:9325 would
     decode the TABLE BYTES as garbage instructions.
+
+    `indirect_call_tables`: optional map of {site_pc24 -> dict} where
+    each value is `{'base': int, 'count': int, 'kind': 'short'|'long'}`.
+    Authorises a JSR (abs,X) site as a real indirect dispatch. When
+    set, the decoder reads `count` table entries at `bank:base`,
+    stamps `insn.dispatch_entries`, and adds the entries as decode
+    successors so handlers get decoded too. Without an entry, JSR
+    (abs,X) is treated as cfg-unauthorised: the insn is placed in the
+    graph with no successors (severing fall-through) and recorded in
+    graph.suppressed_indirect_calls for the build report. See the
+    cfg-required-dispatch-or-kill rule documented on
+    SuppressedIndirectCall.
     """
     entry_m &= 1
     entry_x &= 1
@@ -415,6 +459,72 @@ def decode_function(rom: bytes, bank: int, start: int,
                 insn.dispatch_kind = helper_kind
                 graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=[])
                 continue
+
+        # cfg-required-dispatch-or-kill for JSR (abs,X). See class
+        # SuppressedIndirectCall above and the regression test at
+        # tests/v2/test_decoder_smc_phantom_suppression.py.
+        if insn.mnem == 'JSR' and insn.mode == INDIR_X:
+            site_pc24 = (bank << 16) | pc
+            auth = (indirect_call_tables or {}).get(site_pc24)
+            if auth is not None:
+                # AUTHORISED: read the static dispatch table from
+                # `bank:base`, register entries as decode successors,
+                # stamp `insn.dispatch_entries` for codegen.
+                base = int(auth['base']) & 0xFFFF
+                count = int(auth['count'])
+                kind = auth.get('kind', 'short')
+                entry_size = 3 if kind == 'long' else 2
+                entries = []
+                tbl_pc = base
+                for _i in range(count):
+                    if tbl_pc + entry_size - 1 > 0xFFFF:
+                        break
+                    try:
+                        tbl_off = lorom_offset(bank, tbl_pc)
+                    except AssertionError:
+                        break
+                    if tbl_off + entry_size - 1 >= len(rom):
+                        break
+                    addr16 = rom[tbl_off] | (rom[tbl_off + 1] << 8)
+                    if kind == 'long':
+                        eb = rom[tbl_off + 2]
+                        entries.append((eb << 16) | addr16)
+                    else:
+                        entries.append(addr16)
+                    tbl_pc += entry_size
+                insn.dispatch_entries = entries
+                insn.dispatch_kind = kind
+                # Fall-through edge IS preserved for an authorised JSR
+                # (the call returns to the next insn, like any JSR).
+                # Table entries are added as decode successors (jump
+                # edges) so handlers get auto-promoted.
+                labeled_succ = _labeled_successors(insn, key, bank)
+                # Append jump-kind edges to the in-bank handlers.
+                for e in entries:
+                    e16 = e & 0xFFFF
+                    eb = (e >> 16) & 0xFF if kind == 'long' else bank
+                    if eb == bank and 0x8000 <= e16 <= 0xFFFF:
+                        labeled_succ.append(
+                            (DecodeKey(addr24(eb, e16), key.m, key.x), 'jump')
+                        )
+                succ = [k for (k, _) in labeled_succ]
+                graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=succ)
+                for s, sk in labeled_succ:
+                    if s not in graph.insns:
+                        worklist.append((s, sk, pc))
+                continue
+            # UNAUTHORISED: drop fall-through; record for build report.
+            # The insn lives in the graph (so predecessors' successor
+            # edges still resolve) but with no outgoing successors.
+            graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=[])
+            graph.suppressed_indirect_calls.append(SuppressedIndirectCall(
+                site_pc24=site_pc24,
+                table_base=insn.operand & 0xFFFF,
+                function_entry_pc24=addr24(bank, start),
+                entry_m=key.m,
+                entry_x=key.x,
+            ))
+            continue
 
         labeled_succ = _labeled_successors(insn, key, bank)
         succ = [k for (k, _) in labeled_succ]

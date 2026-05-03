@@ -389,15 +389,24 @@ def main() -> int:
         succeeded = 0
         failed = []
 
+        # Aggregate suppressed JSR (abs,X) sites across the build for
+        # the cfg-required-dispatch-or-kill report. Each emit_bank call
+        # appends the bank's suppressions to this list.
+        all_suppressed: list = []
         for bank, cfg_path, cfg in parsed:
             out_path = out_dir / f'smw_{bank:02x}_v2.c'
             try:
                 if cfg.bank != bank:
                     print(f"  {cfg_path.name}: bank field ${cfg.bank:02X} doesn't match filename ${bank:02X}; using filename")
+                bank_suppressed: list = []
                 src = emit_bank(rom, bank=bank, entries=cfg.entries,
                                 dispatch_helpers=dispatch_helpers,
+                                indirect_call_tables=getattr(
+                                    cfg, 'indirect_call_tables', None),
+                                suppressed_collector=bank_suppressed,
                                 exclude_ranges=cfg.exclude_ranges or None)
                 out_path.write_text(src, encoding='utf-8')
+                all_suppressed.extend(bank_suppressed)
                 if pass_idx == 0:
                     print(f"  OK    bank ${bank:02X}: {len(cfg.entries)} entries -> {out_path}")
                 succeeded += 1
@@ -463,6 +472,40 @@ def main() -> int:
                 total_stubs += 1
         stub_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         print(f"  emitted stubs for {total_stubs} cross-ROM-bank (target, m, x) variants -> {stub_path}")
+
+    # cfg-required-dispatch-or-kill report. Every JSR (abs,X) site
+    # without a cfg `indirect_call_table` directive had its
+    # fall-through edge severed at decode. Listed here so the build
+    # output is loud rather than silent. Runtime trap (cpu_trace
+    # phantom-PC trap) catches any of these PCs that fire.
+    if all_suppressed:
+        # Collapse to unique (function_entry_pc24, site_pc24, m, x) so
+        # repeats across (m,x) variants of the same function show once.
+        unique = {}
+        for s in all_suppressed:
+            key = (s.function_entry_pc24, s.site_pc24, s.entry_m, s.entry_x)
+            unique.setdefault(key, s)
+        print()
+        print(f"=== JSR (abs,X) SUPPRESSED — cfg-required-dispatch-or-kill ===")
+        print(f"{len(unique)} unique site/function/(m,x) tuples "
+              f"({len(all_suppressed)} total occurrences)")
+        # Group by site_pc24 so all (m,x) variants of one site are
+        # reported together.
+        by_site: dict = {}
+        for s in unique.values():
+            by_site.setdefault(s.site_pc24, []).append(s)
+        for site_pc24 in sorted(by_site.keys()):
+            recs = by_site[site_pc24]
+            r0 = recs[0]
+            mx_set = sorted({(r.entry_m, r.entry_x) for r in recs})
+            mx_str = ' '.join(f'M{m}X{x}' for (m, x) in mx_set)
+            funcs = sorted({(r.function_entry_pc24) for r in recs})
+            funcs_str = ', '.join(
+                f'${(f >> 16) & 0xFF:02X}:{f & 0xFFFF:04X}' for f in funcs)
+            print(f"  ${site_pc24:06X}  JSR (${r0.table_base:04X},X)  "
+                  f"variants[{mx_str}]  in {funcs_str}")
+        print(f"Add `indirect_call_table SITE_PC BASE COUNT` to the "
+              f"containing function's cfg to authorise.")
 
     print()
     print(f"v2_regen: {succeeded}/{total} banks emitted")
