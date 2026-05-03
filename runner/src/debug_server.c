@@ -4428,6 +4428,78 @@ static void cmd_stack_op_status(const char *args) {
 #endif
 }
 
+/* phantom_trap_get — JSON dump of the SMC-phantom-PC trap state.
+ * Returns the armed count and any captured hits (each with snapshot,
+ * recomp stack at first hit, and 64-deep block-PC history). Used to
+ * empirically verify that the 11 cf_debt_report-flagged CALL_INDIRECT
+ * sites NEVER fire as real instruction starts. */
+static void cmd_phantom_trap_get(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    static char buf[65536];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"armed\":%d,\"hit_count\":%d,\"hits\":[",
+        g_phantom_trap_armed_count, g_phantom_trap_hit_count);
+    for (int i = 0; i < g_phantom_trap_hit_count; i++) {
+        PhantomTrapHit *h = &g_phantom_trap_hits[i];
+        if (!h->captured) continue;
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"pc24\":\"0x%06x\",\"label\":\"%s\","
+            "\"first_frame\":%d,\"first_block_idx\":%llu,"
+            "\"repeat_count\":%d,"
+            "\"A\":\"0x%04x\",\"X\":\"0x%04x\",\"Y\":\"0x%04x\","
+            "\"S\":\"0x%04x\",\"D\":\"0x%04x\","
+            "\"DB\":\"0x%02x\",\"PB\":\"0x%02x\",\"P\":\"0x%02x\","
+            "\"m\":%u,\"x\":%u,\"e\":%u,"
+            "\"stack\":[",
+            i ? "," : "", h->pc24, h->label,
+            h->first_frame, (unsigned long long)h->first_block_idx,
+            h->repeat_count,
+            h->A, h->X, h->Y, h->S, h->D, h->DB, h->PB, h->P,
+            h->m_flag, h->x_flag, h->e_flag);
+        for (int j = 0; j < h->stack_depth; j++) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "%s\"%s\"", j ? "," : "", h->stack[j]);
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"block_history\":[");
+        for (int j = 0; j < h->block_history_depth; j++) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "%s\"0x%06x\"", j ? "," : "", h->block_history[j]);
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
+/* phantom_trap_clear — disarm everything and zero the captured hits.
+ * After this, phantom_trap_get returns armed=0, hit_count=0. Use to
+ * re-arm a different set via TCP. */
+static void cmd_phantom_trap_clear(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    cpu_trace_phantom_disarm_all();
+    send_fmt("{\"ok\":1,\"armed\":0,\"hit_count\":0}");
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
+/* phantom_trap_arm_smc — re-arm the canonical SMC-phantom set. Useful
+ * after a phantom_trap_clear during a single run. */
+static void cmd_phantom_trap_arm_smc(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    cpu_trace_phantom_arm_smc_set();
+    send_fmt("{\"ok\":1,\"armed\":%d}", g_phantom_trap_armed_count);
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
 /* Stack-drift control: arm / clear / disarm. The auditor auto-arms at
  * boot with frame_min=400 to skip boot prolog noise. After a trip, the
  * boundary ring is FROZEN to preserve the seq window for inspection.
@@ -4919,6 +4991,9 @@ static const CmdEntry s_commands[] = {
     {"stack_op_enable",  cmd_stack_op_enable},
     {"stack_op_disable", cmd_stack_op_disable},
     {"stack_op_status",  cmd_stack_op_status},
+    {"phantom_trap_get",     cmd_phantom_trap_get},
+    {"phantom_trap_clear",   cmd_phantom_trap_clear},
+    {"phantom_trap_arm_smc", cmd_phantom_trap_arm_smc},
     {"db_trip_disarm", cmd_db_trip_disarm},
     {"dma_trip_get",   cmd_dma_trip_get},
     {"pxwatch_arm",    cmd_pxwatch_arm},

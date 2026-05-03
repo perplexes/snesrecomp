@@ -256,6 +256,64 @@ extern FuncWatchHit g_func_watch_hit;
  * without this, tripwires sit idle until manually armed. */
 void cpu_trace_arm_default_watches(void);
 
+/* ── Phantom-PC trap ───────────────────────────────────────────────────────
+ *
+ * Records every block-entry hit at any PC in a small registered set. Used
+ * to PROVE that suspected decoder phantoms (e.g. JSR (abs,X) sites whose
+ * bytes only exist as M=1 STA-operand bytes) never execute as real
+ * instruction starts. If a registered PC actually hits at runtime, the
+ * full snapshot is captured so we can see who called and what (m,x) state
+ * the path entered under.
+ *
+ * Always-on. Cost is one bit-test per cpu_trace_block call. Off the hot
+ * path of normal execution because cpu_trace_block is already gated by
+ * the trace ring's enable.
+ *
+ * API:
+ *   cpu_trace_phantom_arm(pc24, label)  - register a single PC to watch.
+ *                                         Up to PHANTOM_TRAP_MAX PCs.
+ *                                         label is a short tag for the
+ *                                         report (e.g. "RunPlayerBlockCode_EF93").
+ *   cpu_trace_phantom_disarm_all()      - clear the registered set.
+ *   g_phantom_trap_hits                  - 0..PHANTOM_TRAP_MAX captured hits;
+ *                                         each one is at most one (one
+ *                                         hit per PC; subsequent hits
+ *                                         increment .repeat_count only).
+ *   g_phantom_trap_hit_count             - how many slots are populated.
+ */
+#define PHANTOM_TRAP_MAX 32
+
+typedef struct PhantomTrapHit {
+    uint8_t  captured;          /* 1 if this slot has fired */
+    uint32_t pc24;              /* the registered PC */
+    char     label[48];
+    int      first_frame;
+    uint64_t first_block_idx;   /* g_block_trace_idx at first hit, if available */
+    int      repeat_count;
+    /* Snapshot at first hit: */
+    uint16_t A, X, Y, S, D;
+    uint8_t  DB, PB, P, m_flag, x_flag, e_flag;
+    /* Recomp stack at first hit (latest 16 frames, callee->caller order). */
+    int      stack_depth;
+    char     stack[16][64];
+    /* Last 64 block PCs preceding the trap, oldest -> newest. Filled
+     * from g_block_trace ring at trip time. */
+    int      block_history_depth;
+    uint32_t block_history[64];
+} PhantomTrapHit;
+
+extern PhantomTrapHit g_phantom_trap_hits[PHANTOM_TRAP_MAX];
+extern int g_phantom_trap_hit_count;
+extern int g_phantom_trap_armed_count;
+
+void cpu_trace_phantom_arm(uint32_t pc24, const char *label);
+void cpu_trace_phantom_disarm_all(void);
+
+/* Arm the canonical SMC-phantom set (the 11 unique CALL_INDIRECT sites
+ * cf_debt_report flagged on chore/cf-debt-report). Called from
+ * cpu_trace_arm_default_watches at process start. */
+void cpu_trace_phantom_arm_smc_set(void);
+
 /* Called by RomPtr-invalid + cart_readLorom-out-of-range + any other
  * "off-the-rails" softfail to dump the trace ONCE per N events. Avoids
  * burying the trace under repeats of the same fail. */
@@ -827,6 +885,9 @@ static inline void cpu_trace_stack_op(CpuState *c, uint32_t p, uint8_t op,
                                       uint16_t s, int8_t d) {
     (void)c; (void)p; (void)op; (void)s; (void)d;
 }
+static inline void cpu_trace_phantom_arm(uint32_t p, const char *l)         { (void)p; (void)l; }
+static inline void cpu_trace_phantom_disarm_all(void)                       { }
+static inline void cpu_trace_phantom_arm_smc_set(void)                      { }
 
 #endif
 

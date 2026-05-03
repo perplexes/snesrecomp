@@ -710,8 +710,12 @@ static void capture(CpuState *cpu, uint32_t pc24, uint8_t event_type,
     e->new_value = 0;
 }
 
+/* Forward decl — phantom-PC trap check defined later in the file. */
+static inline void phantom_check(CpuState *cpu, uint32_t pc24);
+
 void cpu_trace_block(CpuState *cpu, uint32_t pc24) {
     capture(cpu, pc24, CPU_TR_BLOCK, 0, 0);
+    phantom_check(cpu, pc24);
     /* Stack-range tripwire — fires once when S first leaves the
      * configured range. Disarms after firing to avoid spam. */
     extern uint8_t  g_s_watch_set;
@@ -818,6 +822,182 @@ void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) {
 void cpu_trace_event(CpuState *cpu, uint32_t pc24, uint8_t event_type,
                      uint8_t extra0, uint16_t extra1) {
     capture(cpu, pc24, event_type, extra0, extra1);
+}
+
+/* ── Phantom-PC trap ──────────────────────────────────────────────────
+ * Tracks a small registered set of PCs (e.g. SMC-phantom JSR (abs,X)
+ * sites) and captures a snapshot the first time any of them hits as a
+ * real cpu_trace_block PC. Subsequent hits at the same PC just bump
+ * .repeat_count. Cost on the hot path is one linear scan over the
+ * armed set (≤32 entries) per cpu_trace_block call.
+ */
+
+PhantomTrapHit g_phantom_trap_hits[PHANTOM_TRAP_MAX] = {0};
+int g_phantom_trap_hit_count = 0;
+int g_phantom_trap_armed_count = 0;
+
+/* Registered PCs (parallel array; .pc24 = 0 = unused slot). */
+static struct {
+    uint8_t  used;
+    uint32_t pc24;
+    char     label[48];
+} s_phantom_arm[PHANTOM_TRAP_MAX] = {0};
+
+void cpu_trace_phantom_disarm_all(void) {
+    for (int i = 0; i < PHANTOM_TRAP_MAX; i++) {
+        s_phantom_arm[i].used = 0;
+        s_phantom_arm[i].pc24 = 0;
+        s_phantom_arm[i].label[0] = '\0';
+    }
+    for (int i = 0; i < PHANTOM_TRAP_MAX; i++) {
+        memset(&g_phantom_trap_hits[i], 0, sizeof(g_phantom_trap_hits[i]));
+    }
+    g_phantom_trap_hit_count = 0;
+    g_phantom_trap_armed_count = 0;
+}
+
+void cpu_trace_phantom_arm(uint32_t pc24, const char *label) {
+    for (int i = 0; i < PHANTOM_TRAP_MAX; i++) {
+        if (s_phantom_arm[i].used && s_phantom_arm[i].pc24 == pc24) {
+            return;  /* already armed */
+        }
+    }
+    for (int i = 0; i < PHANTOM_TRAP_MAX; i++) {
+        if (!s_phantom_arm[i].used) {
+            s_phantom_arm[i].used = 1;
+            s_phantom_arm[i].pc24 = pc24;
+            if (label) {
+                strncpy(s_phantom_arm[i].label, label,
+                        sizeof(s_phantom_arm[i].label) - 1);
+                s_phantom_arm[i].label[sizeof(s_phantom_arm[i].label) - 1] = '\0';
+            } else {
+                s_phantom_arm[i].label[0] = '\0';
+            }
+            g_phantom_trap_armed_count++;
+            return;
+        }
+    }
+    fprintf(stderr,
+            "[cpu_trace] phantom_arm: registry full, dropped PC $%06X\n",
+            pc24);
+}
+
+/* Walk backward through the cpu_trace ring for the last N CPU_TR_BLOCK
+ * events and copy their PCs into `out[0..out_max]` oldest-first. */
+static int phantom_collect_block_history(uint32_t *out, int out_max) {
+    if (!g_cpu_trace_ring || g_cpu_trace_capacity == 0) return 0;
+    /* Walk back from idx-1 (most recent) collecting BLOCK events until
+     * we have out_max or run out of ring capacity. */
+    int collected = 0;
+    uint32_t tmp[64];
+    int tmp_max = (out_max > 64) ? 64 : out_max;
+    uint64_t idx = g_cpu_trace_idx;
+    uint64_t cap = g_cpu_trace_capacity;
+    uint64_t walked = 0;
+    while (collected < tmp_max && walked < cap && idx > 0) {
+        idx--;
+        walked++;
+        CpuTraceEvent *e = &g_cpu_trace_ring[idx & (cap - 1)];
+        if (e->event_type == CPU_TR_BLOCK) {
+            tmp[collected++] = e->pc24;
+        }
+    }
+    /* Reverse so out is oldest-first. */
+    for (int i = 0; i < collected; i++) {
+        out[i] = tmp[collected - 1 - i];
+    }
+    return collected;
+}
+
+static void phantom_capture_hit(int armed_idx, CpuState *cpu, uint32_t pc24) {
+    /* Find or allocate a hit slot. Same-PC hits reuse the same slot. */
+    int hit_idx = -1;
+    for (int i = 0; i < g_phantom_trap_hit_count; i++) {
+        if (g_phantom_trap_hits[i].captured &&
+            g_phantom_trap_hits[i].pc24 == pc24) {
+            g_phantom_trap_hits[i].repeat_count++;
+            return;
+        }
+    }
+    if (g_phantom_trap_hit_count < PHANTOM_TRAP_MAX) {
+        hit_idx = g_phantom_trap_hit_count++;
+    } else {
+        return;
+    }
+    PhantomTrapHit *h = &g_phantom_trap_hits[hit_idx];
+    memset(h, 0, sizeof(*h));
+    h->captured = 1;
+    h->pc24 = pc24;
+    if (s_phantom_arm[armed_idx].label[0]) {
+        strncpy(h->label, s_phantom_arm[armed_idx].label,
+                sizeof(h->label) - 1);
+    }
+    extern int snes_frame_counter;
+    h->first_frame = snes_frame_counter;
+    h->first_block_idx = g_cpu_trace_idx;
+    h->repeat_count = 1;
+    if (cpu) {
+        h->A = cpu->A; h->X = cpu->X; h->Y = cpu->Y;
+        h->S = cpu->S; h->D = cpu->D;
+        h->DB = cpu->DB; h->PB = cpu->PB; h->P = cpu->P;
+        h->m_flag = cpu->m_flag; h->x_flag = cpu->x_flag;
+        h->e_flag = cpu->emulation;
+    }
+    int depth = g_recomp_stack_top;
+    if (depth > 16) depth = 16;
+    int skip = g_recomp_stack_top - depth;
+    h->stack_depth = depth;
+    for (int i = 0; i < depth; i++) {
+        const char *p = g_recomp_stack[skip + i];
+        if (p) {
+            strncpy(h->stack[i], p, sizeof(h->stack[i]) - 1);
+        }
+    }
+    h->block_history_depth = phantom_collect_block_history(h->block_history, 64);
+    /* Loud diagnostic — an armed phantom PC fired, which means the
+     * static SMC-phantom classification was wrong for this site OR a
+     * real indirect dispatch is happening here. Caller should treat
+     * this as a hard sign to stop and inspect. */
+    fprintf(stderr,
+            "[PHANTOM-TRAP HIT] PC=$%06X label='%s' frame=%d "
+            "S=$%04X PB=$%02X DB=$%02X m=%d x=%d  "
+            "stack_top=%s\n",
+            pc24, h->label, h->first_frame, h->S, h->PB, h->DB,
+            h->m_flag, h->x_flag,
+            depth > 0 ? h->stack[depth - 1] : "<empty>");
+}
+
+/* Hot-path check called from cpu_trace_block. Linear scan over the
+ * armed set; tiny (≤32) so no special data structure needed. */
+static inline void phantom_check(CpuState *cpu, uint32_t pc24) {
+    if (g_phantom_trap_armed_count == 0) return;
+    for (int i = 0; i < PHANTOM_TRAP_MAX; i++) {
+        if (s_phantom_arm[i].used && s_phantom_arm[i].pc24 == pc24) {
+            phantom_capture_hit(i, cpu, pc24);
+            return;
+        }
+    }
+}
+
+void cpu_trace_phantom_arm_smc_set(void) {
+    /* The 11 unique CALL_INDIRECT sites cf_debt_report flagged on
+     * 2026-05-03. The classification expects all 11 to NEVER fire as
+     * real instruction PCs at runtime. If any do, this trap will
+     * capture a snapshot for inspection. */
+    cpu_trace_phantom_arm(0x009AE6, "HandleMenuCursor_$801D");
+    cpu_trace_phantom_arm(0x00D07E, "CheckPowerUp_$601D");
+    cpu_trace_phantom_arm(0x00D64C, "HandlePlayerPhysics_$A41D");
+    cpu_trace_phantom_arm(0x00EF93, "RunPlayerBlockCode_$9C1D");
+    cpu_trace_phantom_arm(0x00EFB9, "RunPlayerBlockCode_$601D");
+    cpu_trace_phantom_arm(0x00FD9E, "SpawnGlitter_$0410");
+    cpu_trace_phantom_arm(0x00FDD0, "SpawnWaterSplash_$A517");
+    cpu_trace_phantom_arm(0x00FEB8, "SpawnFireball_$A91D");
+    cpu_trace_phantom_arm(0x01FE63, "bank01_FE60_$00F4");
+    cpu_trace_phantom_arm(0x028015, "DropReservedItem_$A21D");
+    cpu_trace_phantom_arm(0x05B350, "GiveCoins_$AD1D");
+    fprintf(stderr,
+            "[cpu_trace] phantom-PC trap armed for %d SMC-phantom sites\n",
+            g_phantom_trap_armed_count);
 }
 
 uint8_t g_stack_op_trace_enabled = 0;
@@ -1265,6 +1445,12 @@ void cpu_trace_arm_default_watches(void) {
      * FIRST sane→$C0 transition with full boundary-event history. */
     cpu_trace_arm_db_tripwire(0xC0);
     fprintf(stderr, "[cpu_trace] DB tripwire armed (first transition to $C0)\n");
+    /* Auto-arm SMC-phantom PC trap — investigation 2026-05-03: the 11
+     * unique CALL_INDIRECT sites cf_debt_report flagged are decoder
+     * phantoms (M=0 wrong-mode decode of M=1 SMC-dispatch byte
+     * sequences). This trap catches any of those PCs actually firing
+     * as block entries — proves the classification empirically. */
+    cpu_trace_phantom_arm_smc_set();
     /* Auto-arm stack-drift tripwire — fires on FIRST function exit
      * after frame >= 400 where exit_S != entry_S AND exit_kind ==
      * NORMAL. Frame gate of 400 skips the boot prolog; the original
