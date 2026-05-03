@@ -396,6 +396,21 @@ def main() -> int:
                     help='Only report this site_type (e.g. CALL_INDIRECT)')
     ap.add_argument('--quiet-detail', action='store_true',
                     help='Summary only — skip the per-site table')
+    ap.add_argument('--with-asm', action='store_true',
+                    help='[CALL_INDIRECT] decode 8 insns before + 4 after each '
+                         'JSR (abs,X) site. Requires --rom and --cfg-dir.')
+    ap.add_argument('--with-bounds', action='store_true',
+                    help='[CALL_INDIRECT] detect CMP/CPX/AND/ASL bounds '
+                         'patterns near each JSR (abs,X). Requires --rom '
+                         'and --cfg-dir. Implies --with-asm.')
+    ap.add_argument('--rom', default='smw.sfc',
+                    help='Path to SMW ROM image (used by --with-asm/bounds)')
+    ap.add_argument('--cfg-dir', default='recomp', dest='cfg_dir',
+                    help='Path to bankXX.cfg directory (used by '
+                         '--with-asm/bounds for function entry lookup)')
+    ap.add_argument('--table-dump-count', type=int, default=8,
+                    help='[CALL_INDIRECT] minimum entries to dump from each '
+                         'ROM table; bounds-detected count overrides if larger')
     args = ap.parse_args()
 
     if not os.path.isdir(args.gen_dir):
@@ -422,15 +437,82 @@ def main() -> int:
     if not args.quiet_detail:
         print(format_detail(all_sites, args.gen_dir))
 
+    # ---- asm/bounds enrichment for CALL_INDIRECT sites ----
+    enriched_records = []
+    if args.with_asm or args.with_bounds:
+        try:
+            import cf_debt_asm_context as ctx_mod
+        except ImportError as e:
+            print(f'\nerror: cf_debt_asm_context import failed ({e})',
+                  file=sys.stderr)
+            return 3
+        if not os.path.exists(args.rom):
+            print(f'\nerror: --rom {args.rom} not found', file=sys.stderr)
+            return 3
+        if not os.path.isdir(args.cfg_dir):
+            print(f'\nerror: --cfg-dir {args.cfg_dir} not found', file=sys.stderr)
+            return 3
+        rom = open(args.rom, 'rb').read()
+        if len(rom) % 1024 == 512:
+            rom = rom[512:]
+        cfg_funcs = ctx_mod.load_cfg_funcs(args.cfg_dir)
+
+        # Collapse the 22 markers to unique (site_pc24, table_base) pairs
+        # so we don't re-decode the same JSR for every (m,x) variant.
+        unique_sites: Dict[Tuple[str, str], Site] = {}
+        variants_for: Dict[Tuple[str, str], List[Site]] = defaultdict(list)
+        for s in all_sites:
+            if s.site_type != 'CALL_INDIRECT':
+                continue
+            if not s.site_pc24 or not s.table_base:
+                continue
+            key = (s.site_pc24, s.table_base)
+            unique_sites.setdefault(key, s)
+            variants_for[key].append(s)
+
+        print('\n')
+        print('CALL_INDIRECT — ASM CONTEXT + BOUNDS')
+        print('=' * 78)
+        print(f'{len(unique_sites)} unique (site_pc, table_base) pairs '
+              f'({len(variants_for)} groups, '
+              f'{sum(len(v) for v in variants_for.values())} total markers)')
+
+        for (site_pc_str, base_str), s in sorted(unique_sites.items()):
+            site_pc24 = int(site_pc_str, 16)
+            table_base = int(base_str, 16)
+            ctx = ctx_mod.enrich_site(
+                rom=rom,
+                cfg_funcs=cfg_funcs,
+                site_pc24=site_pc24,
+                table_base=table_base,
+                function_name=s.function or '',
+                table_dump_count=args.table_dump_count,
+            )
+            print('')
+            print(ctx_mod.format_asm_context(ctx))
+            print(f'  variants ({len(variants_for[(site_pc_str, base_str)])}): '
+                  + ', '.join(sorted({v.function or '?' for v in
+                                      variants_for[(site_pc_str, base_str)]})))
+            enriched_records.append(ctx.to_dict())
+        print('')
+
     print('')
     print(f'Stubs defined in {args.stubs_file}: {len(stub_names)}')
     if stub_names:
         print('  ' + ', '.join(stub_names))
 
     if args.json:
+        payload = {
+            'sites': [asdict(s) for s in all_sites],
+        }
+        if enriched_records:
+            payload['call_indirect_enriched'] = enriched_records
         with open(args.json, 'w', encoding='utf-8') as f:
-            json.dump([asdict(s) for s in all_sites], f, indent=2)
-        print(f'\nJSON sidecar: {args.json} ({len(all_sites)} sites)')
+            json.dump(payload, f, indent=2)
+        print(f'\nJSON sidecar: {args.json} ({len(all_sites)} sites'
+              + (f', {len(enriched_records)} enriched'
+                 if enriched_records else '')
+              + ')')
 
     return 0
 
