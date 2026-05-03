@@ -337,7 +337,36 @@ def emit_function(rom: bytes, bank: int, start: int,
         # Iterate the pre-lowered (Insn, [IROp]) pairs. Calling lower()
         # again here would mint fresh Value-ids and break codegen's
         # vid → C-var mapping (GameMode00↔01 oscillation 2026-05-02).
-        for (di_insn, ir_ops) in block_per_insn_ir.get(key, []):
+        #
+        # Pre-scan: identify JML-with-dispatch_entries (PHK+PER+JML or
+        # PHK+PEA+JML inline-dispatch trampoline; e.g. GenerateTile_Dispatch
+        # at $00:BFBC). The PHK / PEA / PER immediately preceding such a JML
+        # are TRAMPOLINE SETUP that the runtime dispatcher (ExecutePtr /
+        # ExecutePtrLong) would consume — under the synthesized C switch
+        # we inline the dispatch directly, so those pushes would leak 3
+        # garbage bytes onto the simulated SNES stack. Skip emit for them.
+        # Yoshi-block freeze ROOT 2026-05-02 — see project memory.
+        pairs = block_per_insn_ir.get(key, [])
+        skip_emit_idx = set()
+        for ji, (jdi, _jops) in enumerate(pairs):
+            if (jdi.mnem == 'JMP' and jdi.length == 4
+                    and getattr(jdi, 'dispatch_entries', None)):
+                k2 = ji - 1
+                while k2 >= 0:
+                    prev = pairs[k2][0]
+                    if prev.mnem in ('PHK', 'PEA', 'PER'):
+                        skip_emit_idx.add(k2)
+                        k2 -= 1
+                    else:
+                        break
+
+        for ii, (di_insn, ir_ops) in enumerate(pairs):
+            if ii in skip_emit_idx:
+                lines.append(
+                    f"/* trampoline setup {di_insn.mnem} skipped — "
+                    f"inlined into synthesized dispatch below */"
+                )
+                continue
             for op in ir_ops:
                 if isinstance(op, CondBranch):
                     # Cond branch: block has TWO successors: fall-through (0)
@@ -353,12 +382,26 @@ def emit_function(rom: bytes, bank: int, start: int,
                         lines.append(_goto_or_return(fall) + " /* fall-through */")
                         block_terminated = True
                 elif isinstance(op, Goto):
-                    succs = block.successors
-                    if len(succs) >= 1:
-                        lines.append(_goto_or_return(succs[0]))
+                    # JML to a registered dispatch helper (ExecutePtr /
+                    # ExecutePtrLong). Bytes after the JML are a function-
+                    # pointer table; the decoder already read them into
+                    # insn.dispatch_entries. Synthesize a C switch that
+                    # directly invokes each handler — this replaces the
+                    # asm trampoline and keeps the simulated SNES stack
+                    # balanced (PHK+PER setup was skipped above).
+                    insn = di_insn
+                    if getattr(insn, 'dispatch_entries', None):
+                        from v2.codegen import _emit_dispatch
+                        for ln in _emit_dispatch(insn):
+                            lines.append(ln)
+                        block_terminated = True
                     else:
-                        lines.append(f"return RECOMP_RETURN_NORMAL; /* Goto with no successor */")
-                    block_terminated = True
+                        succs = block.successors
+                        if len(succs) >= 1:
+                            lines.append(_goto_or_return(succs[0]))
+                        else:
+                            lines.append(f"return RECOMP_RETURN_NORMAL; /* Goto with no successor */")
+                        block_terminated = True
                 elif isinstance(op, Return):
                     for ln in emit_op(op):
                         lines.append(ln)

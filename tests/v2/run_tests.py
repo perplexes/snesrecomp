@@ -30,6 +30,7 @@ TEST_MODULES = [
     'test_cfg_loader',
     'test_v2_emit_lint',
     'test_nlr_idiom',
+    'test_dispatcher_phk_per_jml',
 ]
 
 
