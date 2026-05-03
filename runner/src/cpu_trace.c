@@ -1000,6 +1000,93 @@ void cpu_trace_phantom_arm_smc_set(void) {
             g_phantom_trap_armed_count);
 }
 
+/* ── Unresolved-cross-fn-goto trap ───────────────────────────────────
+ *
+ * Emitted in-line by codegen at every site where decoder couldn't
+ * resolve a goto target. Keys on (gen function name + source pc24 +
+ * target label) so sibling variants sharing source PCs are
+ * disambiguated — unlike the coarser block-PC phantom trap, this
+ * fires only when the SPECIFIC C body containing the unresolved goto
+ * actually executes.
+ */
+UnresolvedGotoHit g_unresolved_goto_hits[UNRESOLVED_GOTO_TRAP_MAX] = {0};
+int g_unresolved_goto_hit_count = 0;
+
+RecompReturn cpu_trace_unresolved_goto_trap(
+    CpuState *cpu, uint32_t source_pc24, uint32_t target_pc24,
+    const char *func_name, const char *target_label)
+{
+    /* Find or allocate a slot keyed by (func_name, source_pc24). Same
+     * gen function calling the same goto-source site reuses the slot;
+     * different variants (M0X1 vs M1X1 of the same asm function) get
+     * SEPARATE slots because their func_name differs. */
+    int hit_idx = -1;
+    for (int i = 0; i < g_unresolved_goto_hit_count; i++) {
+        UnresolvedGotoHit *h = &g_unresolved_goto_hits[i];
+        if (!h->captured) continue;
+        if (h->source_pc24 == source_pc24
+            && strncmp(h->func_name, func_name ? func_name : "",
+                       sizeof(h->func_name)) == 0)
+        {
+            h->repeat_count++;
+            return RECOMP_RETURN_NORMAL;
+        }
+    }
+    if (g_unresolved_goto_hit_count < UNRESOLVED_GOTO_TRAP_MAX) {
+        hit_idx = g_unresolved_goto_hit_count++;
+    } else {
+        /* Slots exhausted — still loud-log so we know this happened. */
+        fprintf(stderr,
+                "[UNRESOLVED-GOTO TRAP - slots full] source=$%06X "
+                "target=$%06X func='%s' label='%s'\n",
+                source_pc24, target_pc24,
+                func_name ? func_name : "?",
+                target_label ? target_label : "?");
+        return RECOMP_RETURN_NORMAL;
+    }
+    UnresolvedGotoHit *h = &g_unresolved_goto_hits[hit_idx];
+    memset(h, 0, sizeof(*h));
+    h->captured = 1;
+    h->source_pc24 = source_pc24;
+    h->target_pc24 = target_pc24;
+    h->repeat_count = 1;
+    if (func_name) {
+        strncpy(h->func_name, func_name, sizeof(h->func_name) - 1);
+    }
+    if (target_label) {
+        strncpy(h->target_label, target_label, sizeof(h->target_label) - 1);
+    }
+    extern int snes_frame_counter;
+    h->first_frame = snes_frame_counter;
+    h->first_block_idx = g_cpu_trace_idx;
+    if (cpu) {
+        h->A = cpu->A; h->X = cpu->X; h->Y = cpu->Y;
+        h->S = cpu->S; h->D = cpu->D;
+        h->DB = cpu->DB; h->PB = cpu->PB; h->P = cpu->P;
+        h->m_flag = cpu->m_flag; h->x_flag = cpu->x_flag;
+        h->e_flag = cpu->emulation;
+    }
+    int depth = g_recomp_stack_top;
+    if (depth > 16) depth = 16;
+    int skip = g_recomp_stack_top - depth;
+    h->stack_depth = depth;
+    for (int i = 0; i < depth; i++) {
+        const char *p = g_recomp_stack[skip + i];
+        if (p) strncpy(h->stack[i], p, sizeof(h->stack[i]) - 1);
+    }
+    h->block_history_depth = phantom_collect_block_history(h->block_history, 64);
+    /* Loud diagnostic — codegen used to silently return here. */
+    fprintf(stderr,
+            "[UNRESOLVED-GOTO TRAP HIT] func='%s' source=$%06X "
+            "target=$%06X label='%s' frame=%d S=$%04X PB=$%02X DB=$%02X "
+            "m=%d x=%d  stack_top=%s\n",
+            h->func_name, source_pc24, target_pc24,
+            h->target_label, h->first_frame, h->S, h->PB, h->DB,
+            h->m_flag, h->x_flag,
+            depth > 0 ? h->stack[depth - 1] : "<empty>");
+    return RECOMP_RETURN_NORMAL;
+}
+
 void cpu_trace_phantom_arm_unresolvable_goto_set(void) {
     /* Unresolvable-cross-fn-goto block-entry PCs cf_debt_report
      * 2026-05-03 found. Each is the BLOCK PC whose codegen currently

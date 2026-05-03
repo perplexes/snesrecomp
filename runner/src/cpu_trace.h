@@ -320,8 +320,74 @@ void cpu_trace_phantom_arm_smc_set(void);
  * an unknown control transfer into a normal return. The trap fires
  * when any such block executes so we can see whether the silent
  * fall-through is actually exercised at runtime, before flipping the
- * emit to a loud abort. */
+ * emit to a loud abort.
+ *
+ * NOTE 2026-05-03: this trap is too COARSE — it keys on PC only and
+ * fires on shared source PCs inside healthy sibling variants. Use the
+ * cpu_trace_unresolved_goto_trap helper below for in-codegen traps;
+ * those carry the (function, source PC, target PC) tuple so a hit
+ * unambiguously identifies the gen variant that ACTUALLY executed
+ * the unresolvable goto. The phantom-PC variant is kept as a
+ * second-line safety net. */
 void cpu_trace_phantom_arm_unresolvable_goto_set(void);
+
+/* ── Unresolved-cross-fn-goto runtime trap ─────────────────────────────────
+ *
+ * Replaces the historical silent `return RECOMP_RETURN_NORMAL; /\*
+ * unresolvable cross-fn goto *\/` fallback. Emitted by codegen at every
+ * site where the decoder couldn't resolve a goto target inside cfg's
+ * import range.
+ *
+ * Keying: (gen function name + source pc24 + target label) — NOT just
+ * the source PC. Two gen variants of the same asm function share
+ * source PCs but have different bodies; a previous coarser trap fired
+ * on healthy sibling-variant block hits and gave a misleading "live"
+ * reading. Always pass `func_name` (the variant-mangled gen function
+ * name like "SprXXX_Generic_SpriteLockedPath_018B03_M1X1") so the
+ * captured snapshot identifies WHICH C body executed the goto.
+ *
+ * On hit: captures full register snapshot + recomp stack + 64-deep
+ * block-PC history into g_unresolved_goto_hits. Loud stderr line.
+ * In debug/Oracle builds calls abort() so the failure is unmistakable;
+ * in Release the trap returns RECOMP_RETURN_NORMAL so the program
+ * keeps running (matches historical silent behaviour) — but the
+ * captured state is still queryable via TCP.
+ *
+ * Slot capacity is small (per-site) — repeats at the same site bump
+ * .repeat_count instead of allocating new slots.
+ */
+#define UNRESOLVED_GOTO_TRAP_MAX 32
+
+typedef struct UnresolvedGotoHit {
+    uint8_t  captured;
+    uint32_t source_pc24;
+    uint32_t target_pc24;       /* 0 if target is a label-only reference */
+    char     func_name[64];
+    char     target_label[48];
+    int      first_frame;
+    uint64_t first_block_idx;
+    int      repeat_count;
+    /* Snapshot at first hit: */
+    uint16_t A, X, Y, S, D;
+    uint8_t  DB, PB, P, m_flag, x_flag, e_flag;
+    int      stack_depth;
+    char     stack[16][64];
+    int      block_history_depth;
+    uint32_t block_history[64];
+} UnresolvedGotoHit;
+
+extern UnresolvedGotoHit g_unresolved_goto_hits[UNRESOLVED_GOTO_TRAP_MAX];
+extern int g_unresolved_goto_hit_count;
+
+/* Called from generated code at every unresolved-cross-fn-goto site.
+ * Returns RECOMP_RETURN_NORMAL after recording the hit, so codegen
+ * can chain it as `return cpu_trace_unresolved_goto_trap(...);`
+ * preserving the C ABI. In Oracle/debug builds aborts after capture.
+ * `func_name` and `target_label` MUST be string literals or globally
+ * stable (we strncpy the bytes). */
+RecompReturn cpu_trace_unresolved_goto_trap(
+    CpuState *cpu, uint32_t source_pc24, uint32_t target_pc24,
+    const char *func_name, const char *target_label);
 
 /* Called by RomPtr-invalid + cart_readLorom-out-of-range + any other
  * "off-the-rails" softfail to dump the trace ONCE per N events. Avoids
@@ -898,6 +964,11 @@ static inline void cpu_trace_phantom_arm(uint32_t p, const char *l)         { (v
 static inline void cpu_trace_phantom_disarm_all(void)                       { }
 static inline void cpu_trace_phantom_arm_smc_set(void)                      { }
 static inline void cpu_trace_phantom_arm_unresolvable_goto_set(void)        { }
+static inline RecompReturn cpu_trace_unresolved_goto_trap(
+    CpuState *c, uint32_t s, uint32_t t, const char *fn, const char *lbl) {
+    (void)c; (void)s; (void)t; (void)fn; (void)lbl;
+    return RECOMP_RETURN_NORMAL;
+}
 
 #endif
 

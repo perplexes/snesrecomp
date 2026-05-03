@@ -294,7 +294,8 @@ def emit_function(rom: bytes, bank: int, start: int,
     # bank — cross-BANK jumps go through Call/JSL machinery, not Goto).
     _SAME_BANK = bank & 0xFF
 
-    def _goto_or_return(target: DecodeKey, prefix: str = "") -> str:
+    def _goto_or_return(target: DecodeKey, prefix: str = "",
+                         source_pc24: Optional[int] = None) -> str:
         label = _label_for(target)
         if label in local_labels:
             return f"{prefix}goto {label};"
@@ -335,13 +336,21 @@ def emit_function(rom: bytes, bank: int, start: int,
         # regression). Auto-promote only synthesizes for true subroutine
         # entries (JSR/JSL targets), not for arbitrary jump destinations.
         #
-        # Emit a LOUD return so the fallback is observable both at
-        # gen-source review (clear comment) and in any future lint pass
-        # that scans for `unresolvable cross-fn`. Auto-promote is NOT
-        # invoked.
+        # 2026-05-03 Step 2-A: emit no longer silently returns
+        # RECOMP_RETURN_NORMAL. Goes through cpu_trace_unresolved_goto_trap
+        # which captures (gen function name + source_pc24 + target label)
+        # so a hit unambiguously identifies WHICH gen variant ran the
+        # unresolvable goto — disambiguating sibling variants that
+        # happen to share source PCs. The trap returns NORMAL after
+        # capture (Release path) or aborts (Oracle/debug); see
+        # runner/src/cpu_trace.c.
+        src_pc24 = source_pc24 if source_pc24 is not None else 0
+        target_pc24 = (_SAME_BANK << 16) | (target.pc & 0xFFFF)
         return (
-            f"{prefix}return RECOMP_RETURN_NORMAL; "
-            f"/* {label} unresolvable cross-fn goto — "
+            f"{prefix}return cpu_trace_unresolved_goto_trap(cpu, "
+            f"0x{src_pc24:06X}, 0x{target_pc24:06X}, "
+            f"\"{func_name}\", \"{label}\");"
+            f" /* {label} unresolvable cross-fn goto — "
             f"target outside this bank's import range */"
         )
 
@@ -490,11 +499,13 @@ def emit_function(rom: bytes, bank: int, start: int,
                     fall = succs[0] if len(succs) >= 1 else None
                     taken = succs[1] if len(succs) >= 2 else None
                     pred = f"{_reg_for_flag(op.flag)} == {op.take_if}"
+                    blk_pc24 = (bank << 16) | (key.pc & 0xFFFF)
                     if taken is not None:
-                        target_stmt = _goto_or_return(taken)
+                        target_stmt = _goto_or_return(taken, source_pc24=blk_pc24)
                         lines.append(f"if ({pred}) {{ {target_stmt} }}")
                     if fall is not None:
-                        lines.append(_goto_or_return(fall) + " /* fall-through */")
+                        lines.append(_goto_or_return(fall, source_pc24=blk_pc24)
+                                     + " /* fall-through */")
                         block_terminated = True
                 elif isinstance(op, Goto):
                     # JML to a registered dispatch helper (ExecutePtr /
@@ -512,8 +523,10 @@ def emit_function(rom: bytes, bank: int, start: int,
                         block_terminated = True
                     else:
                         succs = block.successors
+                        blk_pc24 = (bank << 16) | (key.pc & 0xFFFF)
                         if len(succs) >= 1:
-                            lines.append(_goto_or_return(succs[0]))
+                            lines.append(_goto_or_return(succs[0],
+                                                          source_pc24=blk_pc24))
                         else:
                             lines.append(f"return RECOMP_RETURN_NORMAL; /* Goto with no successor */")
                         block_terminated = True
@@ -578,8 +591,10 @@ def emit_function(rom: bytes, bank: int, start: int,
         # successor was visited first.
         if not block_terminated:
             succs = block.successors
+            blk_pc24 = (bank << 16) | (key.pc & 0xFFFF)
             if len(succs) >= 1:
-                lines.append(_goto_or_return(succs[0]) + " /* implicit fall-through */")
+                lines.append(_goto_or_return(succs[0], source_pc24=blk_pc24)
+                             + " /* implicit fall-through */")
             else:
                 lines.append("return RECOMP_RETURN_NORMAL; /* no terminator, no successor */")
         block_lines[key] = lines
