@@ -1012,6 +1012,112 @@ static void h_emu_cpu_regs(const char *args) {
         r.a, r.x, r.y, r.s, r.d, r.pc, r.db, r.pb, r.p, r.emulation_mode);
 }
 
+/* emu_gm14_player_trace_get [count=256] [from_idx=last-count]
+ *
+ * Mirrors the recomp-side gm14_player_trace_get cmd. Streams oracle
+ * GM14-entry rows (one per JSON line) terminated by {"end":1}. Field
+ * keys match the recomp side so a Python differ can pair rows by
+ * tick_ordinal and walk fields uniformly.
+ */
+extern uint64_t snes9x_bridge_gm14_idx(void);
+extern uint64_t snes9x_bridge_gm14_capacity(void);
+extern uint64_t snes9x_bridge_gm14_tick_ordinal(void);
+extern int      snes9x_bridge_gm14_get_row(uint64_t abs_idx, void *out_row);
+extern void     snes9x_bridge_gm14_clear(void);
+
+/* Mirrors emu_gm14_row in snes9x_bridge.cpp. Layout MUST stay in sync. */
+struct emu_gm14_row_c {
+    uint64_t tick_ordinal;
+    int32_t  oracle_frame;
+    uint8_t  kind;
+    uint8_t  gamemode;
+    uint8_t  in_15, in_16, in_17, in_18;
+    uint8_t  st_71, st_77;
+    int8_t   xspeed, yspeed;
+    uint16_t pos_x, pos_y;
+    uint8_t  yoshi_187A, yoshi_18E2, yoshi_1888;
+    uint8_t  scroll_1A, scroll_1C;
+    uint8_t  pad0;
+    uint16_t cam_1462, cam_1464;
+    uint8_t  spr9_status, spr9_number;
+    uint16_t spr9_x, spr9_y;
+    uint16_t r_A, r_X, r_Y, r_S, r_D;
+    uint8_t  r_DB, r_PB;
+    uint16_t r_P;
+};
+
+static void h_emu_gm14_player_trace_get(const char *args) {
+    long count = 256;
+    long from  = -1;
+    if (args && *args) {
+        char *endp = NULL;
+        count = strtol(args, &endp, 0);
+        if (endp && *endp) {
+            while (*endp == ' ') endp++;
+            if (*endp) from = strtol(endp, NULL, 0);
+        }
+    }
+    if (count < 1) count = 1;
+    if (count > 8192) count = 8192;
+
+    uint64_t total = snes9x_bridge_gm14_idx();
+    uint64_t cap   = snes9x_bridge_gm14_capacity();
+    if (cap == 0) {
+        debug_server_send_fmt("{\"error\":\"oracle gm14 ring not allocated\"}");
+        return;
+    }
+    uint64_t start;
+    if (from < 0) {
+        start = (total > (uint64_t)count) ? (total - (uint64_t)count) : 0;
+    } else {
+        start = (uint64_t)from;
+        if (start > total) start = total;
+    }
+    if (total > cap && start < (total - cap)) start = total - cap;
+    uint64_t end = start + (uint64_t)count;
+    if (end > total) end = total;
+
+    debug_server_send_fmt(
+        "{\"header\":1,\"total_idx\":%llu,\"capacity\":%llu,\"tick_ordinal\":%llu,"
+        "\"start\":%llu,\"end\":%llu}",
+        (unsigned long long)total, (unsigned long long)cap,
+        (unsigned long long)snes9x_bridge_gm14_tick_ordinal(),
+        (unsigned long long)start, (unsigned long long)end);
+    char line[512];
+    for (uint64_t i = start; i < end; i++) {
+        struct emu_gm14_row_c r;
+        memset(&r, 0, sizeof(r));
+        if (!snes9x_bridge_gm14_get_row(i, &r)) continue;
+        snprintf(line, sizeof(line),
+            "{\"i\":%llu,\"t\":%llu,\"f\":%d,\"k\":%u,\"gm\":%u,"
+            "\"in\":[%u,%u,%u,%u],"
+            "\"st71\":%u,\"st77\":%u,\"xs\":%d,\"ys\":%d,"
+            "\"px\":%u,\"py\":%u,"
+            "\"yoshi\":[%u,%u,%u],"
+            "\"scr\":[%u,%u],\"cam\":[%u,%u],"
+            "\"spr9\":{\"st\":%u,\"n\":%u,\"x\":%u,\"y\":%u},"
+            "\"reg\":{\"A\":%u,\"X\":%u,\"Y\":%u,\"S\":%u,\"D\":%u,\"DB\":%u,\"PB\":%u,\"P\":%u}}",
+            (unsigned long long)i,
+            (unsigned long long)r.tick_ordinal,
+            (int)r.oracle_frame, r.kind, r.gamemode,
+            r.in_15, r.in_16, r.in_17, r.in_18,
+            r.st_71, r.st_77, (int)r.xspeed, (int)r.yspeed,
+            r.pos_x, r.pos_y,
+            r.yoshi_187A, r.yoshi_18E2, r.yoshi_1888,
+            r.scroll_1A, r.scroll_1C, r.cam_1462, r.cam_1464,
+            r.spr9_status, r.spr9_number, r.spr9_x, r.spr9_y,
+            r.r_A, r.r_X, r.r_Y, r.r_S, r.r_D, r.r_DB, r.r_PB, r.r_P);
+        debug_server_send_line(line);
+    }
+    debug_server_send_fmt("{\"end\":1}");
+}
+
+static void h_emu_gm14_player_trace_clear(const char *args) {
+    (void)args;
+    snes9x_bridge_gm14_clear();
+    debug_server_send_fmt("{\"ok\":1}");
+}
+
 /* Dispatcher. Returns 1 if the command was one of ours and was
  * handled, 0 to let the standard s_commands[] scan continue. */
 int emu_oracle_handle_cmd(const char *cmd, const char *args) {
@@ -1049,6 +1155,8 @@ int emu_oracle_handle_cmd(const char *cmd, const char *args) {
     if (strcmp(cmd, "emu_nmi_count") == 0)        { h_emu_nmi_count(args);        return 1; }
     if (strcmp(cmd, "emu_get_insn_trace") == 0)   { h_emu_get_insn_trace(args);   return 1; }
     if (strcmp(cmd, "find_first_divergence") == 0){ h_find_first_divergence(args); return 1; }
+    if (strcmp(cmd, "emu_gm14_player_trace_get") == 0)   { h_emu_gm14_player_trace_get(args);   return 1; }
+    if (strcmp(cmd, "emu_gm14_player_trace_clear") == 0) { h_emu_gm14_player_trace_clear(args); return 1; }
     return 0;
 }
 

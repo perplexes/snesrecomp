@@ -4579,6 +4579,99 @@ static void cmd_unresolved_stub_get(const char *args) {
 #endif
 }
 
+/* gm14_player_trace_get [count] [from_idx]
+ *
+ * Dumps rows from the GM14 per-tick player-state ring as one JSON
+ * row per line, framed with a header and a trailing "{\"end\":1}" marker.
+ *
+ * Args:
+ *   count     — number of rows to return (default 256, max 8192)
+ *   from_idx  — absolute g_gm14_trace_idx to start from (default:
+ *               last `count` rows, i.e. (idx - count) clamped to 0).
+ *
+ * Streamed line-at-a-time so a long history walk doesn't blow a
+ * single response buffer. The differ in Python reads lines until
+ * end:1.
+ */
+static void cmd_gm14_player_trace_get(const char *args) {
+#if SNESRECOMP_TRACE
+    long count = 256;
+    long from = -1;
+    if (args && *args) {
+        char *endp = NULL;
+        count = strtol(args, &endp, 0);
+        if (endp && *endp) {
+            while (*endp == ' ') endp++;
+            if (*endp) from = strtol(endp, NULL, 0);
+        }
+    }
+    if (count < 1) count = 1;
+    if (count > 8192) count = 8192;
+
+    if (!g_gm14_trace_ring || !g_gm14_trace_capacity) {
+        send_fmt("{\"error\":\"gm14 ring not allocated\"}");
+        return;
+    }
+    uint64_t total = g_gm14_trace_idx;
+    uint64_t cap   = g_gm14_trace_capacity;
+    uint64_t start;
+    if (from < 0) {
+        start = (total > (uint64_t)count) ? (total - (uint64_t)count) : 0;
+    } else {
+        start = (uint64_t)from;
+        if (start > total) start = total;
+    }
+    /* Clamp start to the oldest still-resident row. */
+    if (total > cap && start < (total - cap)) start = total - cap;
+    uint64_t end = start + (uint64_t)count;
+    if (end > total) end = total;
+
+    send_fmt("{\"header\":1,\"total_idx\":%llu,\"capacity\":%llu,\"tick_ordinal\":%llu,"
+             "\"start\":%llu,\"end\":%llu}",
+             (unsigned long long)total, (unsigned long long)cap,
+             (unsigned long long)g_gm14_tick_ordinal,
+             (unsigned long long)start, (unsigned long long)end);
+    char line[512];
+    for (uint64_t i = start; i < end; i++) {
+        Gm14TickRow *r = &g_gm14_trace_ring[i & (cap - 1)];
+        snprintf(line, sizeof(line),
+            "{\"i\":%llu,\"t\":%llu,\"f\":%d,\"k\":%u,\"gm\":%u,"
+            "\"in\":[%u,%u,%u,%u],"
+            "\"st71\":%u,\"st77\":%u,\"xs\":%d,\"ys\":%d,"
+            "\"px\":%u,\"py\":%u,"
+            "\"yoshi\":[%u,%u,%u],"
+            "\"scr\":[%u,%u],\"cam\":[%u,%u],"
+            "\"spr9\":{\"st\":%u,\"n\":%u,\"x\":%u,\"y\":%u}}",
+            (unsigned long long)i,
+            (unsigned long long)r->tick_ordinal,
+            (int)r->host_frame, r->kind, r->gamemode,
+            r->in_15, r->in_16, r->in_17, r->in_18,
+            r->st_71, r->st_77, (int)r->xspeed, (int)r->yspeed,
+            r->pos_x, r->pos_y,
+            r->yoshi_187A, r->yoshi_18E2, r->yoshi_1888,
+            r->scroll_1A, r->scroll_1C, r->cam_1462, r->cam_1464,
+            r->spr9_status, r->spr9_number, r->spr9_x, r->spr9_y);
+        send_line(line);
+    }
+    send_fmt("{\"end\":1}");
+#else
+    (void)args;
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
+/* gm14_player_trace_clear — reset the ring (idx=0, ordinal=0). Useful
+ * before re-running attract from a known boot state. */
+static void cmd_gm14_player_trace_clear(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    cpu_trace_gm14_clear();
+    send_fmt("{\"ok\":1}");
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
 /* phantom_trap_arm_smc — re-arm the canonical SMC-phantom set. Useful
  * after a phantom_trap_clear during a single run. */
 static void cmd_phantom_trap_arm_smc(const char *args) {
@@ -5087,6 +5180,8 @@ static const CmdEntry s_commands[] = {
     {"phantom_trap_arm_smc", cmd_phantom_trap_arm_smc},
     {"unresolved_goto_get",  cmd_unresolved_goto_get},
     {"unresolved_stub_get",  cmd_unresolved_stub_get},
+    {"gm14_player_trace_get",   cmd_gm14_player_trace_get},
+    {"gm14_player_trace_clear", cmd_gm14_player_trace_clear},
     {"db_trip_disarm", cmd_db_trip_disarm},
     {"dma_trip_get",   cmd_dma_trip_get},
     {"pxwatch_arm",    cmd_pxwatch_arm},

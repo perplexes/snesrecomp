@@ -51,6 +51,9 @@ uint64_t cpu_trace_init(void) {
     /* Allocate the boundary auditor ring alongside cpu_trace. Same
      * heap-alloc / pow2 / env-tunable shape; sized independently. */
     boundary_audit_init();
+    /* Allocate the GM14 per-tick player-trace ring. Same shape; sized
+     * for ~18 min of in-level play at 60Hz. */
+    cpu_trace_gm14_init();
     return g_cpu_trace_capacity;
 }
 uint8_t       g_db_watch_set = 0;
@@ -155,6 +158,10 @@ void boundary_audit_record_entry(const char *name) {
         s_active[s_active_top].entry_S = be->S;
         s_active_top++;
     }
+    /* GM14 player-trace hook: filter on GameMode14_InLevel_00C47E_M1X1 by
+     * pointer-cached name match. Records one row per ENTRY into the
+     * always-on per-tick ring. */
+    cpu_trace_gm14_maybe_record(name, GM14_KIND_ENTRY);
 }
 
 void boundary_audit_record_exit(const char *name) {
@@ -202,6 +209,104 @@ void boundary_audit_record_exit(const char *name) {
         cpu_trace_stack_drift_check(entry_S, be->S, be->entry_seq, seq,
                                     be->name, be->exit_kind);
     }
+    /* GM14 player-trace hook (EXIT side). Same name filter as ENTRY
+     * via cpu_trace_gm14_maybe_record. */
+    cpu_trace_gm14_maybe_record(name, GM14_KIND_EXIT);
+}
+
+/* ── GM14 (in-level) per-tick player-state trace ring ──────────────────
+ *
+ * Filter: name == "GameMode14_InLevel_00C47E_M1X1". The first time we
+ * see that exact pointer (or strcmp-match) we cache it; subsequent
+ * compares are pointer-equality fast-path because gen-emitted string
+ * literals are stable across the run. Reads field bytes directly from
+ * g_ram[] so it sees writes from gen + hand-bodies.
+ */
+extern uint8_t g_ram[];
+Gm14TickRow *g_gm14_trace_ring = (Gm14TickRow *)0;
+uint64_t     g_gm14_trace_capacity = 0;
+uint64_t     g_gm14_trace_idx = 0;
+uint64_t     g_gm14_tick_ordinal = 0;
+
+static const char  GM14_TARGET_NAME[] = "GameMode14_InLevel_00C47E_M1X1";
+static const char *g_gm14_cached_ptr = NULL;
+
+uint64_t cpu_trace_gm14_init(void) {
+    uint64_t cap = GM14_TRACE_DEFAULT_ENTRIES;
+    const char *env = getenv("SNESRECOMP_GM14_TRACE_ENTRIES");
+    if (env && *env) {
+        unsigned long long v = strtoull(env, NULL, 0);
+        if (v >= (1ULL << 14) && v <= (1ULL << 22)) cap = (uint64_t)v;
+    }
+    cap = round_pow2_down(cap);
+    if (cap < (1ULL << 14)) cap = (1ULL << 14);
+    if (g_gm14_trace_ring) free(g_gm14_trace_ring);
+    g_gm14_trace_ring = (Gm14TickRow *)calloc((size_t)cap, sizeof(Gm14TickRow));
+    g_gm14_trace_capacity = g_gm14_trace_ring ? cap : 0;
+    g_gm14_trace_idx = 0;
+    g_gm14_tick_ordinal = 0;
+    g_gm14_cached_ptr = NULL;
+    fprintf(stderr,
+            "[gm14_trace] ring allocated: %llu entries (~%llu MB)%s\n",
+            (unsigned long long)g_gm14_trace_capacity,
+            (unsigned long long)((g_gm14_trace_capacity * sizeof(Gm14TickRow)) >> 20),
+            g_gm14_trace_ring ? "" : " — ALLOC FAILED");
+    return g_gm14_trace_capacity;
+}
+
+void cpu_trace_gm14_clear(void) {
+    g_gm14_trace_idx = 0;
+    g_gm14_tick_ordinal = 0;
+    if (g_gm14_trace_ring && g_gm14_trace_capacity) {
+        memset(g_gm14_trace_ring, 0,
+               (size_t)g_gm14_trace_capacity * sizeof(Gm14TickRow));
+    }
+}
+
+static inline int gm14_name_matches(const char *name) {
+    if (!name) return 0;
+    if (name == g_gm14_cached_ptr) return 1;
+    if (g_gm14_cached_ptr == NULL && strcmp(name, GM14_TARGET_NAME) == 0) {
+        g_gm14_cached_ptr = name;
+        return 1;
+    }
+    return 0;
+}
+
+void cpu_trace_gm14_maybe_record(const char *func_name, uint8_t kind) {
+    if (!g_gm14_trace_ring || !g_gm14_trace_capacity) return;
+    if (!gm14_name_matches(func_name)) return;
+    if (kind == GM14_KIND_ENTRY) g_gm14_tick_ordinal++;
+    extern int snes_frame_counter;
+    uint64_t slot = g_gm14_trace_idx & (g_gm14_trace_capacity - 1);
+    Gm14TickRow *r = &g_gm14_trace_ring[slot];
+    r->tick_ordinal = g_gm14_tick_ordinal;
+    r->host_frame   = snes_frame_counter;
+    r->kind         = kind;
+    r->gamemode     = g_ram[0x0100];
+    r->in_15        = g_ram[0x0015];
+    r->in_16        = g_ram[0x0016];
+    r->in_17        = g_ram[0x0017];
+    r->in_18        = g_ram[0x0018];
+    r->st_71        = g_ram[0x0071];
+    r->st_77        = g_ram[0x0077];
+    r->xspeed       = (int8_t)g_ram[0x007B];
+    r->yspeed       = (int8_t)g_ram[0x007D];
+    r->pos_x        = (uint16_t)(g_ram[0x0094] | ((uint16_t)g_ram[0x0095] << 8));
+    r->pos_y        = (uint16_t)(g_ram[0x0096] | ((uint16_t)g_ram[0x0097] << 8));
+    r->yoshi_187A   = g_ram[0x187A];
+    r->yoshi_18E2   = g_ram[0x18E2];
+    r->yoshi_1888   = g_ram[0x1888];
+    r->scroll_1A    = g_ram[0x001A];
+    r->scroll_1C    = g_ram[0x001C];
+    r->pad0         = 0;
+    r->cam_1462     = (uint16_t)(g_ram[0x1462] | ((uint16_t)g_ram[0x1463] << 8));
+    r->cam_1464     = (uint16_t)(g_ram[0x1464] | ((uint16_t)g_ram[0x1465] << 8));
+    r->spr9_status  = g_ram[0x14C8 + 9];
+    r->spr9_number  = g_ram[0x009E + 9];
+    r->spr9_x       = (uint16_t)(g_ram[0x00E4 + 9] | ((uint16_t)g_ram[0x14E0 + 9] << 8));
+    r->spr9_y       = (uint16_t)(g_ram[0x00D8 + 9] | ((uint16_t)g_ram[0x14D4 + 9] << 8));
+    g_gm14_trace_idx++;
 }
 
 /* ── DB→<value> one-shot tripwire ──────────────────────────────────────
@@ -682,8 +787,14 @@ static int scoped_tripwire_maybe_fire(CpuState *cpu, uint8_t bank,
     return 1;
 }
 
+/* When the stack-drift tripwire fires, freeze the cpu_trace ring so
+ * the events leading up to the trip survive subsequent activity. The
+ * boundary ring is already frozen by cpu_trace_stack_drift_check; this
+ * mirrors that for cpu_trace so retrospective probes have full context. */
+extern StackDriftTripwire g_stack_drift_tripwire;
 static void capture(CpuState *cpu, uint32_t pc24, uint8_t event_type,
                     uint8_t extra0, uint16_t extra1) {
+    if (g_stack_drift_tripwire.triggered) return;
     int slot = (int)(g_cpu_trace_idx++ & (g_cpu_trace_capacity - 1));
     CpuTraceEvent *e = &g_cpu_trace_ring[slot];
     e->pc24 = pc24;
@@ -1180,7 +1291,9 @@ void cpu_trace_phantom_arm_unresolvable_goto_set(void) {
             g_phantom_trap_armed_count);
 }
 
-uint8_t g_stack_op_trace_enabled = 0;
+/* Default-on so frame-822 stack ops are captured from boot without TCP
+ * arming latency. cmd_stack_op_disable can clear when not needed. */
+uint8_t g_stack_op_trace_enabled = 1;
 
 void cpu_trace_stack_op(CpuState *cpu, uint32_t pc24, uint8_t op_id,
                         uint16_t old_S, int8_t delta) {

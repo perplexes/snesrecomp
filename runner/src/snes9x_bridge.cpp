@@ -364,7 +364,147 @@ extern "C" const emu_snap_entry* emu_snap_lookup(int call_idx) {
     return &s_emu_snap_ring[slot];
 }
 
+/* ---- Oracle GM14 per-tick player-state trace ----
+ *
+ * Mirrors the recomp-side g_gm14_trace_ring (cpu_trace.c). Captures one
+ * row each time the oracle CPU enters $00:C47E (GameMode14_InLevel).
+ * Reads field bytes directly from Memory.RAM (snes9x's bank-7E low WRAM).
+ * Always-on: no arming required; the row is captured every time PB:PC
+ * hits the entry, from the moment the bridge is loaded.
+ *
+ * Entry-only for Step 2a — exit detection deferred (see Step 2 plan).
+ */
+#define EMU_GM14_DEFAULT_ENTRIES (1u << 17)
+#define EMU_GM14_TARGET_PC24      0x00C47Eu
+#define EMU_GM14_TARGET_PB        0x00u
+#define EMU_GM14_TARGET_PC        0xC47Eu
+
+struct emu_gm14_row {
+    uint64_t tick_ordinal;
+    int32_t  oracle_frame;
+    uint8_t  kind;             /* 0 = ENTRY (only kind populated for now) */
+    uint8_t  gamemode;
+    uint8_t  in_15, in_16, in_17, in_18;
+    uint8_t  st_71, st_77;
+    int8_t   xspeed, yspeed;
+    uint16_t pos_x, pos_y;
+    uint8_t  yoshi_187A, yoshi_18E2, yoshi_1888;
+    uint8_t  scroll_1A, scroll_1C;
+    uint8_t  pad0;
+    uint16_t cam_1462, cam_1464;
+    uint8_t  spr9_status, spr9_number;
+    uint16_t spr9_x, spr9_y;
+    /* Oracle CPU regs at entry — useful when divergence is in inputs/etc.
+     * Field names prefixed `r_` to avoid clashing with snes9x's 65c816.h
+     * macros (e.g. `PB` expands to `PC.B.xPB`). */
+    uint16_t r_A, r_X, r_Y, r_S, r_D;
+    uint8_t  r_DB, r_PB;
+    uint16_t r_P;
+};
+
+static emu_gm14_row *s_emu_gm14_ring = nullptr;
+static uint64_t      s_emu_gm14_capacity = 0;
+static uint64_t      s_emu_gm14_idx = 0;
+static uint64_t      s_emu_gm14_tick_ordinal = 0;
+
+static uint64_t emu_gm14_round_pow2_down(uint64_t v) {
+    if (v == 0) return 0;
+    uint64_t p = 1;
+    while ((p << 1) && (p << 1) <= v) p <<= 1;
+    return p;
+}
+
+extern "C" uint64_t snes9x_bridge_gm14_init(void) {
+    uint64_t cap = EMU_GM14_DEFAULT_ENTRIES;
+    const char *env = getenv("SNESRECOMP_EMU_GM14_RING_ENTRIES");
+    if (env && *env) {
+        unsigned long long v = strtoull(env, NULL, 0);
+        if (v >= (1ULL << 14) && v <= (1ULL << 22)) cap = (uint64_t)v;
+    }
+    cap = emu_gm14_round_pow2_down(cap);
+    if (cap < (1ULL << 14)) cap = (1ULL << 14);
+    if (s_emu_gm14_ring) free(s_emu_gm14_ring);
+    s_emu_gm14_ring = (emu_gm14_row *)calloc((size_t)cap, sizeof(emu_gm14_row));
+    s_emu_gm14_capacity = s_emu_gm14_ring ? cap : 0;
+    s_emu_gm14_idx = 0;
+    s_emu_gm14_tick_ordinal = 0;
+    return s_emu_gm14_capacity;
+}
+
+extern "C" void snes9x_bridge_gm14_clear(void) {
+    s_emu_gm14_idx = 0;
+    s_emu_gm14_tick_ordinal = 0;
+    if (s_emu_gm14_ring && s_emu_gm14_capacity) {
+        memset(s_emu_gm14_ring, 0,
+               (size_t)s_emu_gm14_capacity * sizeof(emu_gm14_row));
+    }
+}
+
+extern "C" uint64_t snes9x_bridge_gm14_idx(void)        { return s_emu_gm14_idx; }
+extern "C" uint64_t snes9x_bridge_gm14_capacity(void)   { return s_emu_gm14_capacity; }
+extern "C" uint64_t snes9x_bridge_gm14_tick_ordinal(void){ return s_emu_gm14_tick_ordinal; }
+
+/* Read a row by absolute idx. Returns 1 if the requested idx is still
+ * resident in the ring window, 0 otherwise. Caller passes a buffer
+ * matching the row layout (see emu_gm14_row). */
+extern "C" int snes9x_bridge_gm14_get_row(uint64_t abs_idx, void *out_row) {
+    if (!s_emu_gm14_ring || !s_emu_gm14_capacity) return 0;
+    if (abs_idx >= s_emu_gm14_idx) return 0;
+    if (s_emu_gm14_idx > s_emu_gm14_capacity &&
+        abs_idx < (s_emu_gm14_idx - s_emu_gm14_capacity)) {
+        return 0;
+    }
+    emu_gm14_row *r = &s_emu_gm14_ring[abs_idx & (s_emu_gm14_capacity - 1)];
+    memcpy(out_row, r, sizeof(*r));
+    return 1;
+}
+
 void s9x_bridge_insn_hook(uint8_t pb, uint16_t pc, uint8_t op) {
+    /* Oracle GM14 entry-only trace. Fires every time PB:PC == $00:C47E.
+     * No call-depth/return tracking needed for entry-only first pass. */
+    if (s_emu_gm14_ring && s_emu_gm14_capacity &&
+        pb == EMU_GM14_TARGET_PB && pc == EMU_GM14_TARGET_PC) {
+        s_emu_gm14_tick_ordinal++;
+        uint64_t slot = s_emu_gm14_idx & (s_emu_gm14_capacity - 1);
+        emu_gm14_row *r = &s_emu_gm14_ring[slot];
+        const uint8_t *RAM = Memory.RAM;
+        r->tick_ordinal = s_emu_gm14_tick_ordinal;
+        r->oracle_frame = (int32_t)s_watch_frame;
+        r->kind         = 0;  /* ENTRY */
+        r->gamemode     = RAM[0x0100];
+        r->in_15        = RAM[0x0015];
+        r->in_16        = RAM[0x0016];
+        r->in_17        = RAM[0x0017];
+        r->in_18        = RAM[0x0018];
+        r->st_71        = RAM[0x0071];
+        r->st_77        = RAM[0x0077];
+        r->xspeed       = (int8_t)RAM[0x007B];
+        r->yspeed       = (int8_t)RAM[0x007D];
+        r->pos_x        = (uint16_t)(RAM[0x0094] | ((uint16_t)RAM[0x0095] << 8));
+        r->pos_y        = (uint16_t)(RAM[0x0096] | ((uint16_t)RAM[0x0097] << 8));
+        r->yoshi_187A   = RAM[0x187A];
+        r->yoshi_18E2   = RAM[0x18E2];
+        r->yoshi_1888   = RAM[0x1888];
+        r->scroll_1A    = RAM[0x001A];
+        r->scroll_1C    = RAM[0x001C];
+        r->pad0         = 0;
+        r->cam_1462     = (uint16_t)(RAM[0x1462] | ((uint16_t)RAM[0x1463] << 8));
+        r->cam_1464     = (uint16_t)(RAM[0x1464] | ((uint16_t)RAM[0x1465] << 8));
+        r->spr9_status  = RAM[0x14C8 + 9];
+        r->spr9_number  = RAM[0x009E + 9];
+        r->spr9_x       = (uint16_t)(RAM[0x00E4 + 9] | ((uint16_t)RAM[0x14E0 + 9] << 8));
+        r->spr9_y       = (uint16_t)(RAM[0x00D8 + 9] | ((uint16_t)RAM[0x14D4 + 9] << 8));
+        r->r_A          = Registers.A.W;
+        r->r_X          = Registers.X.W;
+        r->r_Y          = Registers.Y.W;
+        r->r_S          = Registers.S.W;
+        r->r_D          = Registers.D.W;
+        r->r_DB         = Registers.DB;
+        r->r_PB         = Registers.PB;
+        r->r_P          = (uint16_t)Registers.P.W;
+        s_emu_gm14_idx++;
+    }
+
     /* Function-boundary snapshot fires regardless of insn-trace state. */
     if (s_emu_snap_pc24 != 0) {
         uint32_t cur = ((uint32_t)pb << 16) | pc;
@@ -470,6 +610,18 @@ int snes9x_bridge_init(const char *rom_path) {
     }
     snes9x_bridge_insn_trace_on();
     fprintf(stderr, "[snes9x] always-on insn trace armed\n");
+
+    /* Always-on oracle GM14 player-state trace ring. Captures one row
+     * per oracle-side entry to $00:C47E (GameMode14_InLevel) so a
+     * recomp-vs-oracle differ can pair by tick_ordinal. */
+    {
+        uint64_t cap = snes9x_bridge_gm14_init();
+        fprintf(stderr,
+            "[snes9x] gm14 player-trace ring allocated: %llu entries (~%llu MB)%s\n",
+            (unsigned long long)cap,
+            (unsigned long long)((cap * sizeof(emu_gm14_row)) >> 20),
+            s_emu_gm14_ring ? "" : " — ALLOC FAILED");
+    }
 
     // Always-on VRAM byte-write trace. The recompiler-side ring + the
     // oracle-side ring together let cmd_vram_write_diff mechanically

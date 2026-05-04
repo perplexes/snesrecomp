@@ -958,6 +958,89 @@ static inline void cpu_trace_pending_skip_consume(CpuState *c, uint32_t p,
 }
 #endif
 
+/* ── GameMode-14 (in-level) per-tick player-state trace ring ───────────
+ *
+ * One compact row per call into GameMode14_InLevel_00C47E (entry + exit).
+ * Captures the high-signal SMW player/sprite/camera state at each tick
+ * boundary so a recomp-vs-oracle differ can find the FIRST tick at
+ * which any field diverges. Always-on; ring rotates over runs longer
+ * than the configured capacity.
+ *
+ * Fields: read from g_ram[] (canonical WRAM offsets), so the snapshot
+ * sees writes from BOTH gen code (which goes through cpu_write*) and
+ * any direct g_ram[] writes from hand-bodies / runtime helpers.
+ *
+ * Pairing: gm14_tick_ordinal increments on each ENTRY. The matching
+ * EXIT row carries the same ordinal. The differ pairs ENTRY/EXIT by
+ * ordinal across recomp + oracle.
+ *
+ * Ring size: default 1<<17 = 131,072 rows ≈ 65,536 ticks ≈ 18 minutes
+ * @ 60Hz. Override via SNESRECOMP_GM14_TRACE_ENTRIES (clamped pow2 in
+ * [1<<14, 1<<22]).
+ */
+enum {
+    GM14_KIND_ENTRY = 0,
+    GM14_KIND_EXIT  = 1,
+};
+
+typedef struct Gm14TickRow {
+    uint64_t tick_ordinal;       /* monotonic; increments on each ENTRY */
+    int32_t  host_frame;         /* snes_frame_counter at row */
+    uint8_t  kind;               /* GM14_KIND_ENTRY | GM14_KIND_EXIT */
+    uint8_t  gamemode;           /* $7E:0100 */
+    /* Inputs */
+    uint8_t  in_15;              /* $7E:0015 */
+    uint8_t  in_16;              /* $7E:0016 */
+    uint8_t  in_17;              /* $7E:0017 */
+    uint8_t  in_18;              /* $7E:0018 */
+    /* Player core */
+    uint8_t  st_71;              /* $7E:0071 PlayerState */
+    uint8_t  st_77;              /* $7E:0077 blocked/contact flags */
+    int8_t   xspeed;             /* $7E:007B */
+    int8_t   yspeed;             /* $7E:007D */
+    uint16_t pos_x;              /* $7E:0094-0095 */
+    uint16_t pos_y;              /* $7E:0096-0097 */
+    /* Yoshi mount */
+    uint8_t  yoshi_187A;         /* $7E:187A 1=on Yoshi */
+    uint8_t  yoshi_18E2;         /* $7E:18E2 yoshi sprite slot */
+    uint8_t  yoshi_1888;         /* $7E:1888 cape/yoshi misc */
+    uint8_t  scroll_1A;          /* $7E:001A camera X low */
+    uint8_t  scroll_1C;          /* $7E:001C camera Y low */
+    uint8_t  pad0;
+    uint16_t cam_1462;           /* $7E:1462 layer 1 X */
+    uint16_t cam_1464;           /* $7E:1464 layer 1 Y */
+    /* Sprite slot 9 */
+    uint8_t  spr9_status;        /* $7E:14C8+9 */
+    uint8_t  spr9_number;        /* $7E:009E+9 */
+    uint16_t spr9_x;             /* high<<8 | low: $7E:14E0+9 / $7E:00E4+9 */
+    uint16_t spr9_y;             /* high<<8 | low: $7E:14D4+9 / $7E:00D8+9 */
+} Gm14TickRow;
+
+/* Default capacity: 1<<17. Sized for ~18 min @ 60Hz × 2 rows/tick. */
+#define GM14_TRACE_DEFAULT_ENTRIES (1ULL << 17)
+
+#if SNESRECOMP_TRACE
+extern Gm14TickRow *g_gm14_trace_ring;
+extern uint64_t     g_gm14_trace_capacity;   /* always pow2; mask = cap - 1 */
+extern uint64_t     g_gm14_trace_idx;        /* monotonic; modulo via mask */
+extern uint64_t     g_gm14_tick_ordinal;     /* monotonic tick counter */
+
+/* Init the GM14 ring. Called from cpu_trace_init at process start. */
+uint64_t cpu_trace_gm14_init(void);
+/* Reset the ring (idx=0, tick_ordinal=0). Does not free memory. */
+void cpu_trace_gm14_clear(void);
+/* Internal — called from boundary_audit_record_entry/exit when the
+ * function name matches GameMode14_InLevel_00C47E_M1X1. The check is
+ * pointer-equality fast-path with a one-time strcmp seed. */
+void cpu_trace_gm14_maybe_record(const char *func_name, uint8_t kind);
+#else
+static inline uint64_t cpu_trace_gm14_init(void) { return 0; }
+static inline void cpu_trace_gm14_clear(void) { }
+static inline void cpu_trace_gm14_maybe_record(const char *n, uint8_t k) {
+    (void)n; (void)k;
+}
+#endif
+
 /* Dump the last `n` events of the main ring to stderr, prefixed by `tag`. */
 void cpu_trace_dump_recent(const char *tag, int n);
 /* Dump the entire dbpb ring (newest first). */
