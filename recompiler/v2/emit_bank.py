@@ -69,6 +69,8 @@ def emit_bank(rom: bytes, bank: int,
               indirect_call_tables=None,
               suppressed_collector=None,
               const_z_fold_collector=None,
+              dispatch_target_suppressed_collector=None,
+              data_regions=None,
               exclude_ranges: Optional[List[Tuple[int, int]]] = None) -> str:
     """Emit one bank's C source.
 
@@ -130,6 +132,9 @@ def emit_bank(rom: bytes, bank: int,
             indirect_call_tables=indirect_call_tables,
             suppressed_collector=suppressed_collector,
             const_z_fold_collector=const_z_fold_collector,
+            dispatch_target_suppressed_collector=
+                dispatch_target_suppressed_collector,
+            data_regions=data_regions,
             exclude_ranges=exclude_ranges,
             tail_call_pc16=entry.tail_call_pc16,
             tail_call_target_name=tail_call_target_name,

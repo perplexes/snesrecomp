@@ -88,6 +88,35 @@ def _dispatch_target_is_padding(rom: bytes, bank: int, pc16: int,
     return False
 
 
+def _addr_in_data_regions(data_regions, bank: int, pc16: int) -> bool:
+    """Return True iff (bank, pc16) is inside any cfg-declared
+    `data_region <bank> <start> <end>` range.
+
+    cfg `data_region` directives encode a real ROM fact: this byte
+    range is a data table, not executable code. Used by the dispatch-
+    table reader to halt at entries whose targets land inside data,
+    and by the auto-promote pass to refuse synthesizing function
+    entries inside data ranges. The classic case is a JSL dispatcher
+    whose table overruns into a sibling data table — without the
+    cfg fact the decoder can't tell those bytes apart from real
+    handlers.
+
+    `data_regions` is the list[tuple[int, int, int]] of (bank, start,
+    end_exclusive) tuples produced by cfg_loader. None / empty list
+    is a no-op (returns False).
+    """
+    if not data_regions:
+        return False
+    pc16 &= 0xFFFF
+    bank &= 0xFF
+    for (b, s, e) in data_regions:
+        if (b & 0xFF) != bank:
+            continue
+        if (s & 0xFFFF) <= pc16 < (e & 0xFFFF):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class DecodeKey:
     """Identifies a decoded instruction by 24-bit address + entry M/X.
@@ -135,6 +164,21 @@ class SuppressedIndirectCall:
 
 
 @dataclass
+class DispatchTargetSuppressed:
+    """Bookkeeping for a dispatch-table entry the decoder REFUSED to
+    accept because the target lands inside a cfg `data_region` (an
+    explicit ROM-structure fact saying "these bytes are data, not
+    code"). The dispatch table is truncated at this entry; the
+    target never becomes a callable handler. Recorded so the build
+    report can list every suppression — never silent.
+    """
+    site_pc24: int       # PC of the dispatcher JSL/JML
+    target_pc24: int     # 24-bit address of the rejected entry
+    reason: str          # 'data_region' (extensible)
+    table_index: int     # 0-based index of the entry that triggered the stop
+
+
+@dataclass
 class ConstZFold:
     """Bookkeeping entry for a BEQ/BNE rewritten to an unconditional Goto
     by `_apply_constant_z_fold`. Recorded for the build report so each
@@ -178,6 +222,7 @@ class FunctionDecodeGraph:
     insns: Dict[DecodeKey, DecodedInsn] = field(default_factory=dict)
     suppressed_indirect_calls: List[SuppressedIndirectCall] = field(default_factory=list)
     const_z_folds: List[ConstZFold] = field(default_factory=list)
+    dispatch_targets_suppressed: List[DispatchTargetSuppressed] = field(default_factory=list)
 
     def keys_at_pc(self, pc24: int) -> List[DecodeKey]:
         """Return all DecodeKeys with this 24-bit PC (across entry mode states)."""
@@ -366,7 +411,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                     *, end: Optional[int] = None,
                     max_insns: int = 4000,
                     dispatch_helpers: Optional[Dict[int, str]] = None,
-                    indirect_call_tables: Optional[Dict[int, dict]] = None
+                    indirect_call_tables: Optional[Dict[int, dict]] = None,
+                    data_regions: Optional[List[Tuple[int, int, int]]] = None
                     ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
@@ -496,6 +542,18 @@ def decode_function(rom: bytes, bank: int, start: int,
                     # `_dispatch_target_is_padding` doc.
                     if _dispatch_target_is_padding(rom, eb, addr16):
                         break
+                    # cfg `data_region:` gate — explicit ROM fact that
+                    # (bank, pc16) range is data. Trumps any addr-range
+                    # heuristic since the directive is ground truth.
+                    if _addr_in_data_regions(data_regions, eb, addr16):
+                        graph.dispatch_targets_suppressed.append(
+                            DispatchTargetSuppressed(
+                                site_pc24=(bank << 16) | pc,
+                                target_pc24=(eb << 16) | addr16,
+                                reason='data_region',
+                                table_index=len(entries),
+                            ))
+                        break
                     full_entry = (eb << 16) | addr16
                 else:
                     if addr16 == 0:
@@ -505,6 +563,15 @@ def decode_function(rom: bytes, bank: int, start: int,
                     if addr16 < 0x8000:
                         break
                     if _dispatch_target_is_padding(rom, bank, addr16):
+                        break
+                    if _addr_in_data_regions(data_regions, bank, addr16):
+                        graph.dispatch_targets_suppressed.append(
+                            DispatchTargetSuppressed(
+                                site_pc24=(bank << 16) | pc,
+                                target_pc24=(bank << 16) | addr16,
+                                reason='data_region',
+                                table_index=len(entries),
+                            ))
                         break
                     full_entry = (bank << 16) | addr16
                 # NOTE: do NOT bound the entry value by the dispatching

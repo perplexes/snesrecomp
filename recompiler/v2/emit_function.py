@@ -65,6 +65,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                   indirect_call_tables=None,
                   suppressed_collector=None,
                   const_z_fold_collector=None,
+                  dispatch_target_suppressed_collector=None,
+                  data_regions=None,
                   exclude_ranges: Optional[List[Tuple[int, int]]] = None,
                   tail_call_pc16: Optional[int] = None,
                   tail_call_target_name: Optional[str] = None) -> str:
@@ -80,7 +82,8 @@ def emit_function(rom: bytes, bank: int, start: int,
     """
     graph = decode_function(rom, bank, start, entry_m, entry_x, end=end,
                             dispatch_helpers=dispatch_helpers,
-                            indirect_call_tables=indirect_call_tables)
+                            indirect_call_tables=indirect_call_tables,
+                            data_regions=data_regions)
     # Forward any suppressed indirect calls upward so emit_bank can
     # aggregate them into the build report. List-of-records.
     if suppressed_collector is not None:
@@ -89,6 +92,10 @@ def emit_function(rom: bytes, bank: int, start: int,
     # is recorded once per (function entry, branch site).
     if const_z_fold_collector is not None:
         const_z_fold_collector.extend(graph.const_z_folds)
+    # cfg-data_region dispatch-target suppressions.
+    if dispatch_target_suppressed_collector is not None:
+        dispatch_target_suppressed_collector.extend(
+            graph.dispatch_targets_suppressed)
     cfg = build_cfg(graph)
 
     if func_name is None:

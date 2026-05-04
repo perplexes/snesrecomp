@@ -176,6 +176,15 @@ def main() -> int:
     # decoder emits one M1X1 body, but DecompressTo callers run x=0
     # and the M1X1 body misdecodes LDX #$8000 as LDX #$00 + falling
     # opcode bytes.
+    # Aggregate cfg `data_region` directives across all banks. Passed
+    # into decode_function on every variant-discovery + emit decode so
+    # the dispatch-table reader and any future code-data classifier
+    # has a single source of truth.
+    all_data_regions: list = []
+    for _bank, _cfg_path, _cfg in parsed:
+        if _cfg.data_regions:
+            all_data_regions.extend(_cfg.data_regions)
+
     print()
     print("Discovering per-(m,x) variants (fixed-point)...")
     # variants: dict[addr_24 -> set[(m, x)]]
@@ -220,7 +229,8 @@ def main() -> int:
             graph = decode_function(rom, bank, start,
                                     entry_m=em, entry_x=ex,
                                     end=end,
-                                    dispatch_helpers=dispatch_helpers)
+                                    dispatch_helpers=dispatch_helpers,
+                                    data_regions=all_data_regions or None)
         except Exception:
             continue
         for di in graph.insns.values():
@@ -238,6 +248,19 @@ def main() -> int:
             else:
                 # Dispatch tables on this insn still demand variants.
                 target = None
+            if target is not None:
+                # Defensive: if the static call target lands inside a
+                # cfg data_region, the bytes there can't be a real
+                # routine. Don't promote a variant for it. The
+                # dispatch-table reader has the same check; this
+                # second-line catches direct JSR/JSL into data.
+                tbank_for_filter = (target >> 16) & 0xFF
+                tpc_for_filter = target & 0xFFFF
+                if all_data_regions and any(
+                        (b & 0xFF) == tbank_for_filter and
+                        (s & 0xFFFF) <= tpc_for_filter < (e & 0xFFFF)
+                        for (b, s, e) in all_data_regions):
+                    target = None
             if target is not None:
                 em2 = ins.m_flag & 1
                 ex2 = ins.x_flag & 1
@@ -332,9 +355,16 @@ def main() -> int:
             return 0
         by_bank: dict[int, list[tuple[int, int, int]]] = {}
         for addr, em, ex in demands:
-            by_bank.setdefault((addr >> 16) & 0xFF, []).append(
-                (addr & 0xFFFF, em, ex)
-            )
+            tbank = (addr >> 16) & 0xFF
+            tpc = addr & 0xFFFF
+            # Refuse to synthesize a function entry inside a cfg
+            # data_region. That range was declared as data; turning
+            # bytes into a callable handler defeats the directive.
+            if all_data_regions and any(
+                    (b & 0xFF) == tbank and (s & 0xFFFF) <= tpc < (e & 0xFFFF)
+                    for (b, s, e) in all_data_regions):
+                continue
+            by_bank.setdefault(tbank, []).append((tpc, em, ex))
         bank_index = {b: cfg for (b, _p, cfg) in parsed_repo}
         added_local = 0
         for bank, items in by_bank.items():
@@ -396,6 +426,10 @@ def main() -> int:
         # Aggregate constant-Z folds (BEQ/BNE rewritten to unconditional
         # Goto by the decoder post-pass). Build report at end of pass.
         all_const_z_folds: list = []
+        # Aggregate dispatch-target suppressions (decoder rejected an
+        # auto-detected dispatch table entry because the target lands
+        # inside a cfg `data_region`). Build report.
+        all_dispatch_suppressed: list = []
         for bank, cfg_path, cfg in parsed:
             out_path = out_dir / f'smw_{bank:02x}_v2.c'
             try:
@@ -403,16 +437,21 @@ def main() -> int:
                     print(f"  {cfg_path.name}: bank field ${cfg.bank:02X} doesn't match filename ${bank:02X}; using filename")
                 bank_suppressed: list = []
                 bank_const_z_folds: list = []
+                bank_dispatch_suppressed: list = []
                 src = emit_bank(rom, bank=bank, entries=cfg.entries,
                                 dispatch_helpers=dispatch_helpers,
                                 indirect_call_tables=getattr(
                                     cfg, 'indirect_call_tables', None),
                                 suppressed_collector=bank_suppressed,
                                 const_z_fold_collector=bank_const_z_folds,
+                                dispatch_target_suppressed_collector=
+                                    bank_dispatch_suppressed,
+                                data_regions=cfg.data_regions or None,
                                 exclude_ranges=cfg.exclude_ranges or None)
                 out_path.write_text(src, encoding='utf-8')
                 all_suppressed.extend(bank_suppressed)
                 all_const_z_folds.extend(bank_const_z_folds)
+                all_dispatch_suppressed.extend(bank_dispatch_suppressed)
                 if pass_idx == 0:
                     print(f"  OK    bank ${bank:02X}: {len(cfg.entries)} entries -> {out_path}")
                 succeeded += 1
@@ -518,6 +557,32 @@ def main() -> int:
                   f"variants[{mx_str}]  in {funcs_str}")
         print(f"Add `indirect_call_table SITE_PC BASE COUNT` to the "
               f"containing function's cfg to authorise.")
+
+    # cfg `data_region` dispatch-target suppressions. Every dispatch
+    # table entry the decoder rejected because the target lands inside
+    # a declared data_region. Listed so the suppression is visible —
+    # never silent — and so the cfg author can audit which entries
+    # were dropped per dispatcher.
+    if all_dispatch_suppressed:
+        # Collapse duplicates (same (site_pc24, target_pc24, reason)
+        # may surface from multiple variants of the same dispatcher).
+        seen = set()
+        unique = []
+        for r in all_dispatch_suppressed:
+            k = (r.site_pc24, r.target_pc24, r.reason)
+            if k in seen:
+                continue
+            seen.add(k)
+            unique.append(r)
+        print()
+        print("=== DISPATCH TARGET SUPPRESSED BY DATA_REGION ===")
+        print(f"{len(unique)} unique (site, target, reason) suppressions "
+              f"({len(all_dispatch_suppressed)} total occurrences)")
+        for r in sorted(unique, key=lambda x: (x.site_pc24, x.target_pc24)):
+            print(f"  bank ${(r.target_pc24 >> 16) & 0xFF:02X}  "
+                  f"target ${r.target_pc24 & 0xFFFF:04X}  "
+                  f"site ${r.site_pc24:06X}  "
+                  f"index {r.table_index}  reason={r.reason}")
 
     # Constant-Z branch-fold report. Each entry is one BEQ/BNE the
     # decoder rewrote to an unconditional Goto because the same-block
