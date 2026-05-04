@@ -35,7 +35,9 @@ from v2.codegen import (  # noqa: E402
     take_unresolved_call_targets,
     take_unresolved_goto_targets,
 )
-from v2.decoder import classify_dispatch_helper, decode_function  # noqa: E402
+from v2.decoder import (  # noqa: E402
+    classify_dispatch_helper, decode_function, analyze_function_exit_mx,
+)
 from v2.emit_bank import emit_bank  # noqa: E402
 
 
@@ -292,6 +294,55 @@ def main() -> int:
     print(f"  variants for {len(variants)} unique callee targets; "
           f"{multi_count} multi-(m,x); decoded {len(decoded)} (addr, m, x) tuples")
 
+    # ── Callee-exit-(m,x) map from cfg `exit_mx:m,x` directives ─────
+    #
+    # Narrow opt-in: cfg lines may carry `exit_mx:M,X` to annotate a
+    # function's exit (m, x) state. Used by decoder._labeled_successors
+    # to set the resume (m, x) after JSR/JSL, instead of assuming the
+    # callee preserves m/x. Required when the callee internally does
+    # SEP/REP without restoring before its RTS — e.g. SMW $00:F465
+    # starts with SEP #$20 (m=1) and never resets, so callers in m=0
+    # would otherwise misdecode operand widths after the JSR.
+    #
+    # Earlier version (2026-05-03 morning) tried an automatic fixpoint
+    # over EVERY decoded (addr, m, x) variant. Worked for the slope-
+    # bug case but introduced regressions elsewhere (GraphicsDecompress
+    # entered an infinite loop) — the analyzer's exit-(m,x) inference
+    # was apparently wrong for some functions where intermediate
+    # callee_exit_mx values during the fixpoint produced unreachable-
+    # path artefacts that biased the analyzer. Reverted to opt-in until
+    # we have a more principled inference (e.g. CFG-aware path
+    # analysis, or per-edge propagation that doesn't rely on the same
+    # decoder used for emit).
+    callee_exit_mx: dict = {}
+    cfg_exit_mx_count = 0
+    declared_exit_mx: dict = {}  # (bank, addr16) -> (m, x)
+    # Collect from `exit_mx_at <bankaddr16> <m> <x>` cfg directives
+    # across all banks. This is the standalone form — independent of
+    # any `func` entry, so callees discovered only via auto-promote
+    # (e.g. $00:F461 — reached via JSR but with no own `func` line)
+    # can still carry the annotation.
+    for bank, _cfg_path, cfg in parsed:
+        for (b_id, addr16, m_val, x_val) in cfg.exit_mx_at:
+            declared_exit_mx[(b_id & 0xFF, addr16 & 0xFFFF)] = (m_val, x_val)
+    # Broadcast each declared exit_mx to ALL (m, x) variants at the
+    # target address. Variants are the discovered set in `variants`.
+    for (b_id, addr16), (ex_m, ex_xf) in declared_exit_mx.items():
+        target_pc24 = (b_id << 16) | addr16
+        mx_set = variants.get(target_pc24)
+        if mx_set:
+            for em, ex2 in mx_set:
+                callee_exit_mx[(target_pc24, em, ex2)] = (ex_m, ex_xf)
+                cfg_exit_mx_count += 1
+        else:
+            # No discovered variants — apply to cfg-default (1, 1).
+            callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
+            cfg_exit_mx_count += 1
+    if cfg_exit_mx_count:
+        print()
+        print(f"Loaded {cfg_exit_mx_count} cfg `exit_mx_at` annotations "
+              f"({len(declared_exit_mx)} unique target addresses)")
+
     # Apply per-(m,x) variants to existing cfg entries: for each cfg
     # entry whose target address has more than its declared (m, x)
     # variant, clone the entry with each additional (m, x). The
@@ -408,7 +459,10 @@ def main() -> int:
                 added_local += 1
         return added_local
 
-    max_passes = 8
+    # Bumped 2026-05-03: with the new callee-exit-(m,x) propagation,
+    # decoder discovers more variants in transitive callees. 8 passes
+    # leaves ~239 unresolved externals; 24 converges in practice.
+    max_passes = 24
     last_unresolved: set = set()
     for pass_idx in range(max_passes):
         # Clear any leftovers from prior session/process.
@@ -447,7 +501,8 @@ def main() -> int:
                                 dispatch_target_suppressed_collector=
                                     bank_dispatch_suppressed,
                                 data_regions=cfg.data_regions or None,
-                                exclude_ranges=cfg.exclude_ranges or None)
+                                exclude_ranges=cfg.exclude_ranges or None,
+                                callee_exit_mx=callee_exit_mx)
                 out_path.write_text(src, encoding='utf-8')
                 all_suppressed.extend(bank_suppressed)
                 all_const_z_folds.extend(bank_const_z_folds)

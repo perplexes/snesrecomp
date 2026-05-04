@@ -257,17 +257,21 @@ def post_mx(insn: Insn, in_m: int, in_x: int) -> Tuple[int, int]:
     return in_m, in_x
 
 
-def _successors(insn: Insn, key: DecodeKey, bank: int) -> List[DecodeKey]:
+def _successors(insn: Insn, key: DecodeKey, bank: int,
+                callee_exit_mx: Optional[Dict] = None) -> List[DecodeKey]:
     """Compute successor DecodeKeys for one decoded instruction.
 
     Returns plain DecodeKey list (kind-agnostic) for callers that only
     need successors. See `_labeled_successors` for the (key, kind)
     variant used by `decode_function`'s end: gating logic.
     """
-    return [k for (k, _kind) in _labeled_successors(insn, key, bank)]
+    return [k for (k, _kind) in
+            _labeled_successors(insn, key, bank,
+                                callee_exit_mx=callee_exit_mx)]
 
 
-def _labeled_successors(insn: Insn, key: DecodeKey, bank: int):
+def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
+                        callee_exit_mx: Optional[Dict] = None):
     """Compute (DecodeKey, edge_kind) tuples for one decoded instruction.
 
     `edge_kind` is one of:
@@ -324,8 +328,36 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int):
     # Long-jump (JML) is decoded as JMP+LONG above; JSL is its own mnem.
     # Both are cross-routine calls; only the fall-through (return site)
     # is decoded into THIS function. The callee is a separate cfg entry.
+    #
+    # If `callee_exit_mx` provides this callee's exit (m, x) under the
+    # entry variant we're calling with, use it for the fall-through key.
+    # Without that, we'd assume m/x are preserved across the JSR — wrong
+    # whenever the callee has an internal SEP/REP that doesn't restore
+    # before returning (e.g. SMW's $00:F465 sets m=1 via SEP #$20,
+    # leaving caller in m=1 even though caller had m=0 pre-call). The
+    # decoder previously kept caller's (m, x), causing it to mis-decode
+    # subsequent operand widths and synthesise phantom branch targets
+    # at mid-instruction bytes (root cause of the RunPlayerBlockCode
+    # -1 stack drift / "Mario dies on slope" bug, 2026-05-03).
     if mnem in ('JSR', 'JSL'):
-        return [(DecodeKey(addr24(bank, next_pc), post_m, post_x), 'fall')]
+        ret_m, ret_x = post_m, post_x
+        if callee_exit_mx is not None:
+            target_pc24: Optional[int] = None
+            if mnem == 'JSR' and insn.length == 3:
+                target_pc24 = addr24(bank, insn.operand & 0xFFFF)
+            elif mnem == 'JSL':
+                target_pc24 = insn.operand & 0xFFFFFF
+            if target_pc24 is not None:
+                # Lookup keyed by (target_pc24, entry_m, entry_x) — same
+                # entry variant we're invoking. Different variants of
+                # the same callee may have different exit (m, x).
+                key_lookup = (target_pc24, post_m, post_x)
+                hit = callee_exit_mx.get(key_lookup)
+                if hit is not None:
+                    em, ex = hit
+                    if em is not None and ex is not None:
+                        ret_m, ret_x = em & 1, ex & 1
+        return [(DecodeKey(addr24(bank, next_pc), ret_m, ret_x), 'fall')]
 
     # Default: linear fall-through with post-instruction mode.
     return [(DecodeKey(addr24(bank, next_pc), post_m, post_x), 'fall')]
@@ -412,7 +444,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                     max_insns: int = 4000,
                     dispatch_helpers: Optional[Dict[int, str]] = None,
                     indirect_call_tables: Optional[Dict[int, dict]] = None,
-                    data_regions: Optional[List[Tuple[int, int, int]]] = None
+                    data_regions: Optional[List[Tuple[int, int, int]]] = None,
+                    callee_exit_mx: Optional[Dict] = None,
                     ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
@@ -636,7 +669,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                 # (the call returns to the next insn, like any JSR).
                 # Table entries are added as decode successors (jump
                 # edges) so handlers get auto-promoted.
-                labeled_succ = _labeled_successors(insn, key, bank)
+                labeled_succ = _labeled_successors(insn, key, bank,
+                                           callee_exit_mx=callee_exit_mx)
                 # Append jump-kind edges to the in-bank handlers.
                 for e in entries:
                     e16 = e & 0xFFFF
@@ -664,7 +698,8 @@ def decode_function(rom: bytes, bank: int, start: int,
             ))
             continue
 
-        labeled_succ = _labeled_successors(insn, key, bank)
+        labeled_succ = _labeled_successors(insn, key, bank,
+                                           callee_exit_mx=callee_exit_mx)
         succ = [k for (k, _) in labeled_succ]
         graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=succ)
 
@@ -678,6 +713,51 @@ def decode_function(rom: bytes, bank: int, start: int,
     _apply_constant_z_fold(graph)
 
     return graph
+
+
+def analyze_function_exit_mx(graph: 'FunctionDecodeGraph'
+                             ) -> 'Tuple[Optional[int], Optional[int]]':
+    """Compute the (m, x) state at which a function returns to its caller.
+
+    Walks every decoded RTS/RTL/RTI in `graph` and takes the meet of
+    their entry (m, x) — RTS/RTL/RTI don't modify M/X, so each
+    terminator's `(insn.m_flag, insn.x_flag)` IS the (m, x) at the
+    moment of return.
+
+    If all return paths exit with the same (m, x), returns that pair.
+    If any two return paths disagree, the corresponding component is
+    `None` (ambiguous — the caller's decoder should fall back to its
+    pre-call assumption rather than commit to a wrong width).
+
+    Functions with no terminators (e.g. infinite loops, table-only)
+    return `(None, None)` — no callable resume state to propagate.
+    """
+    exit_m: Optional[int] = None
+    exit_x: Optional[int] = None
+    have_any = False
+    m_ambig = False
+    x_ambig = False
+    for di in graph.insns.values():
+        ins = di.insn
+        if ins.mnem not in ('RTS', 'RTL', 'RTI'):
+            continue
+        em = ins.m_flag & 1
+        ex = ins.x_flag & 1
+        if not have_any:
+            exit_m, exit_x = em, ex
+            have_any = True
+            continue
+        if not m_ambig and exit_m != em:
+            m_ambig = True
+        if not x_ambig and exit_x != ex:
+            x_ambig = True
+    if m_ambig:
+        exit_m = None
+    if x_ambig:
+        exit_x = None
+    if not have_any:
+        return (None, None)
+    return (exit_m, exit_x)
 
 
 def _apply_constant_z_fold(graph: FunctionDecodeGraph) -> None:

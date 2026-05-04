@@ -64,6 +64,11 @@ class BankCfg:
     exclude_ranges: List[Tuple[int, int]] = field(default_factory=list)
     data_regions: List[Tuple[int, int, int]] = field(default_factory=list)  # (bank, start, end)
     verbatim_blocks: List[str] = field(default_factory=list)
+    # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
+    # exit (m, x) state of a function at that PC. Decoder uses this to
+    # resume callers after JSR/JSL with the correct (m, x) instead of
+    # assuming the callee preserves the caller's state.
+    exit_mx_at: List[Tuple[int, int, int, int]] = field(default_factory=list)
 
 
 # Token regex helpers
@@ -134,7 +139,7 @@ def load_bank_cfg(path: str) -> BankCfg:
             if head == 'comment' and '=' in stripped:
                 continue
 
-            # func <name> <hex_pc> [end:<hex_end>] [tail_call:<hex>] [sig:...] [...]
+            # func <name> <hex_pc> [end:<hex_end>] [tail_call:<hex>] [exit_mx:M,X] [sig:...] [...]
             if head == 'func':
                 if len(tokens) < 3:
                     continue
@@ -142,6 +147,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 start = _parse_hex(tokens[2])
                 end: Optional[int] = None
                 tail_call_pc16: Optional[int] = None
+                exit_mx: Optional[Tuple[int, int]] = None
                 for t in tokens[3:]:
                     if t.startswith('end:'):
                         try:
@@ -158,9 +164,37 @@ def load_bank_cfg(path: str) -> BankCfg:
                             tail_call_pc16 = _parse_hex(t[len('tail_call:'):])
                         except ValueError:
                             pass
-                cfg.entries.append(BankEntry(
+                    elif t.startswith('exit_mx:'):
+                        # Per-function callee-exit (m, x) annotation.
+                        # Format: exit_mx:M,X with M and X each 0 or 1.
+                        # When the decoder hits a JSR/JSL whose target's
+                        # cfg entry has this directive, it resumes the
+                        # caller at the annotated (m, x) instead of
+                        # assuming the callee preserves the caller's
+                        # state. Required for callees that internally
+                        # SEP/REP without restoring (e.g. SMW $00:F465
+                        # sets m=1 via SEP #$20 at entry, never resets,
+                        # so callers in m=0 must resume at m=1 — without
+                        # the annotation, decoder mis-decodes operand
+                        # widths and synthesises phantom branch targets
+                        # at mid-instruction bytes; root cause of the
+                        # RunPlayerBlockCode -1 stack drift / Mario-
+                        # dies-on-slope bug, 2026-05-03).
+                        try:
+                            mx_str = t[len('exit_mx:'):]
+                            parts = mx_str.split(',')
+                            if len(parts) == 2:
+                                exit_mx = (int(parts[0]) & 1,
+                                           int(parts[1]) & 1)
+                        except (ValueError, IndexError):
+                            pass
+                be = BankEntry(
                     name=name, start=start, end=end,
-                    tail_call_pc16=tail_call_pc16))
+                    tail_call_pc16=tail_call_pc16)
+                # Non-default attribute on BankEntry; assign post-init.
+                if exit_mx is not None:
+                    be.exit_mx = exit_mx
+                cfg.entries.append(be)
                 continue
 
             # name <hex_addr> <friendly_name> [sig:...]
@@ -183,6 +217,28 @@ def load_bank_cfg(path: str) -> BankCfg:
                 except ValueError:
                     continue
                 cfg.exclude_ranges.append((s, e))
+                continue
+
+            # exit_mx_at <hex_24bit_addr> <m> <x>
+            #
+            # Stand-alone callee-exit-(m,x) annotation. Records that the
+            # function entry at the given 24-bit address returns with
+            # the named (m, x). Independent of `func` entries — useful
+            # when the function is a callee discovered via auto-promote
+            # (e.g. SMW $00:F461 is reached only via JSR from inside
+            # other functions; it has no cfg `func` line, so the
+            # annotation goes here). Bank is encoded in the high byte
+            # of the address; format `<bank><addr16>` as 6 hex digits.
+            if head == 'exit_mx_at' and len(tokens) >= 4:
+                try:
+                    addr_24 = _parse_hex(tokens[1])
+                    m_val = int(tokens[2]) & 1
+                    x_val = int(tokens[3]) & 1
+                except ValueError:
+                    continue
+                bank_id = (addr_24 >> 16) & 0xFF
+                addr16 = addr_24 & 0xFFFF
+                cfg.exit_mx_at.append((bank_id, addr16, m_val, x_val))
                 continue
 
             # data_region <bank> <start> <end>

@@ -69,7 +69,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                   data_regions=None,
                   exclude_ranges: Optional[List[Tuple[int, int]]] = None,
                   tail_call_pc16: Optional[int] = None,
-                  tail_call_target_name: Optional[str] = None) -> str:
+                  tail_call_target_name: Optional[str] = None,
+                  callee_exit_mx=None) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
     Pipeline:
@@ -83,7 +84,8 @@ def emit_function(rom: bytes, bank: int, start: int,
     graph = decode_function(rom, bank, start, entry_m, entry_x, end=end,
                             dispatch_helpers=dispatch_helpers,
                             indirect_call_tables=indirect_call_tables,
-                            data_regions=data_regions)
+                            data_regions=data_regions,
+                            callee_exit_mx=callee_exit_mx)
     # Forward any suppressed indirect calls upward so emit_bank can
     # aggregate them into the build report. List-of-records.
     if suppressed_collector is not None:
