@@ -1,13 +1,13 @@
 """snesrecomp.tools.v2_regen
 
 Drive the v2 pipeline over every bank cfg in a SMW-style repo,
-producing one C file per bank. Side-by-side with v1 — does NOT touch
-src/gen/ or recomp/funcs.h.
+producing one C file per bank into the single active generated-code
+directory.
 
 Usage:
     python snesrecomp/tools/v2_regen.py --rom smw.sfc \
         --cfg-dir SuperMarioWorldRecomp/recomp \
-        --out-dir SuperMarioWorldRecomp/src/gen_v2
+        --out-dir SuperMarioWorldRecomp/src/gen
 
 For each `bankXX.cfg` under --cfg-dir:
     1. parse via cfg_loader.load_bank_cfg
@@ -503,7 +503,7 @@ def main() -> int:
                                 data_regions=cfg.data_regions or None,
                                 exclude_ranges=cfg.exclude_ranges or None,
                                 callee_exit_mx=callee_exit_mx)
-                out_path.write_text(src, encoding='utf-8')
+                out_path.write_text(src, encoding='utf-8', newline='\n')
                 all_suppressed.extend(bank_suppressed)
                 all_const_z_folds.extend(bank_const_z_folds)
                 all_dispatch_suppressed.extend(bank_dispatch_suppressed)
@@ -576,7 +576,7 @@ def main() -> int:
                     f'}}'
                 )
                 total_stubs += 1
-        stub_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        stub_path.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='\n')
         print(f"  emitted stubs for {total_stubs} cross-ROM-bank (target, m, x) variants -> {stub_path}")
 
     # cfg-required-dispatch-or-kill report. Every JSR (abs,X) site

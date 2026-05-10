@@ -9,10 +9,7 @@ rewrite.
 Usage:
     python snesrecomp/tools/v2_sync_funcs_h.py \
         --cfg-dir SuperMarioWorldRecomp/recomp \
-        --out SuperMarioWorldRecomp/recomp/funcs_v2.h
-
-Drops to a SEPARATE output filename (funcs_v2.h) so we don't clobber
-the v1 funcs.h until Phase 6h flips the SMW build over.
+        --out SuperMarioWorldRecomp/recomp/funcs.h
 """
 
 import argparse
@@ -56,10 +53,10 @@ def emit_funcs_h(items: list) -> str:
     Declares each function in five forms:
       - bare name (the cfg-default alias emitted by emit_bank)
       - all four (m, x) variants: <name>_M0X0, _M0X1, _M1X0, _M1X1
-    Only variants actually emitted by gen_v2 will resolve at link time;
+    Only variants actually emitted by the active generated C will resolve at link time;
     unused-but-declared variants are harmless (C linker only flags
     undefined REFERENCES, not undefined declarations). This lets cross-
-    bank Calls in gen_v2 reference whichever variant the caller's
+    bank calls reference whichever variant the caller's
     (m, x) selects without a side-car emit→header dependency.
     """
     lines = []
@@ -71,7 +68,7 @@ def emit_funcs_h(items: list) -> str:
     lines.append(' * CalcTiltPlatformArgs) — all v1 ABI fiction, gone.')
     lines.append(' *')
     lines.append(' * Per-(m, x) variants: every named function is declared in')
-    lines.append(' * five forms so cross-bank gen_v2 calls can reference any')
+    lines.append(' * five forms so cross-bank generated calls can reference any')
     lines.append(' * variant without a side-car header dependency. Unused')
     lines.append(' * variants are harmless (C only flags undefined REFERENCES,')
     lines.append(' * not undefined DECLARATIONS at link time).')
@@ -94,6 +91,18 @@ def emit_funcs_h(items: list) -> str:
             for ex in (0, 1):
                 lines.append(f'RecompReturn {name}_M{em}X{ex}(CpuState *cpu);')
     lines.append('')
+    lines.append('/* Hand-written non-recompiled bodies still declared here.')
+    lines.append(' * These are not produced by the v2 emit pipeline but are')
+    lines.append(' * referenced by recompiled code via funcs.h.')
+    lines.append(' */')
+    lines.append('void ResetSpritesFunc(int wh);')
+    lines.append('void SmwRunOneFrameOfGame_Internal(void);')
+    lines.append('')
+    lines.append('/* Watchdog hook called at every block label. Implemented in')
+    lines.append(' * snesrecomp/runner/src/common_cpu_infra.c.')
+    lines.append(' */')
+    lines.append('void WatchdogCheck(void);')
+    lines.append('')
     return '\n'.join(lines)
 
 
@@ -112,7 +121,7 @@ def main() -> int:
     src = emit_funcs_h(items)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(src, encoding='utf-8')
+    out_path.write_text(src, encoding='utf-8', newline='\n')
     print(f"v2_sync_funcs_h: wrote {len(items)} declarations to {out_path}")
     return 0
 

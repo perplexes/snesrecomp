@@ -1300,7 +1300,7 @@ RecompReturn cpu_trace_unresolved_goto_trap(
 
 /* ── Unresolved-stub trap ────────────────────────────────────────────
  *
- * Stub bodies in src/gen_v2/unresolved_stubs_v2.c chain into this. A
+ * Stub bodies in src/gen/unresolved_stubs_v2.c chain into this. A
  * fire means a generated function actually called a target whose
  * bank wasn't in the cfg set — i.e. either real code reaches data
  * decoded as code (recompiler bug) or a phantom variant got executed.

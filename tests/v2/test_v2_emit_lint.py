@@ -13,7 +13,7 @@ Catches the next foot-gun in the cpu->B class:
     from cpu_p_to_mirrors / cpu_mirrors_to_p, so REP/SEP/PLP wouldn't
     keep them coherent).
 
-The lint scans the actual emitted gen_v2/*.c sources rather than the
+The lint scans the actual emitted gen/*.c sources rather than the
 codegen.py emitter functions directly. That's the load-bearing surface
 — if codegen.py emits an unexpected field through any conditional code
 path, the gen output will reveal it. The lint runs as part of the
@@ -117,7 +117,7 @@ def _scan_v2_codegen_emits() -> dict:
     This is the load-bearing path for the lint: if a contributor adds
     a new shadow field and writes an emitter that reads it, the new
     cpu->FIELD shows up here regardless of the parent repo's filesystem
-    layout. The emit-level scan is more brittle than scanning gen_v2/*.c
+    layout. The emit-level scan is more brittle than scanning gen/*.c
     output (it only catches references in unconditional code paths) but
     far more portable.
     """
@@ -180,7 +180,7 @@ def _scan_v2_codegen_emits() -> dict:
 
 
 def _scan_gen_fields() -> dict:
-    """Walk every gen_v2/*.c and return a {field_name: [files...]} map
+    """Walk every gen/*.c and return a {field_name: [files...]} map
     of every cpu->FIELD reference. Returns {} if the gen dir doesn't
     exist (fresh checkout, no regen yet — lint silently skips)."""
     gen = _gen_v2_dir()
@@ -204,7 +204,7 @@ def test_no_unexpected_cpu_fields_in_v2_emit():
     before regen + build + visual.
 
     Scans the in-process emit output rather than the regenerated
-    gen_v2/*.c files so the test is portable across the project's
+    gen/*.c files so the test is portable across the project's
     junction layout (where filesystem ancestor walks miss the parent
     repo)."""
     seen = _scan_v2_codegen_emits()

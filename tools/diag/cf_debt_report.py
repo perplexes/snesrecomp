@@ -404,9 +404,9 @@ def format_detail(sites: List[Site], gen_dir: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--gen-dir', default='src/gen_v2',
+    ap.add_argument('--gen-dir', default='src/gen',
                     help='Directory containing smw_XX_v2.c files')
-    ap.add_argument('--stubs-file', default='src/gen_v2/unresolved_stubs_v2.c',
+    ap.add_argument('--stubs-file', default='src/gen/unresolved_stubs_v2.c',
                     help='Generated stubs file (defines no-op bodies)')
     ap.add_argument('--json', default=None,
                     help='Optional path for JSON sidecar of all sites')

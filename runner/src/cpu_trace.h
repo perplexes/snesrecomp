@@ -394,7 +394,7 @@ RecompReturn cpu_trace_unresolved_goto_trap(
  *
  * Replaces the historical silent stub body
  *   `(void)cpu; return RECOMP_RETURN_NORMAL;`
- * emitted into src/gen_v2/unresolved_stubs_v2.c for Call targets that
+ * emitted into src/gen/unresolved_stubs_v2.c for Call targets that
  * resolve to a ROM bank not in the cfg set. These targets are
  * typically data decoded as code (garbled JSL operands from a phantom
  * function) — but a silent normal-return hides any case where one
