@@ -39,6 +39,7 @@ from v2.decoder import (  # noqa: E402
     classify_dispatch_helper, decode_function, analyze_function_exit_mx,
 )
 from v2.emit_bank import emit_bank  # noqa: E402
+from v2.wrapper_autoroute import detect_and_route as autoroute_wrappers, format_fix_summary  # noqa: E402
 
 
 _BANK_CFG_RE = re.compile(r'bank([0-9a-fA-F]+)\.cfg$')
@@ -92,6 +93,16 @@ def main() -> int:
             addr = nd.addr_24 & 0xFFFFFF
             name_map[addr] = nd.name
             cross_bank_names.setdefault((addr >> 16) & 0xFF, []).append(nd)
+
+    # Auto-route SMW PHB/PHK/PLB/JSR/PLB/RTL wrapper-bypass cfg aliases.
+    # Class fix for the bug where cross-bank `name <wrapper_pc> <fn>` +
+    # `name <body_pc> <fn>` (same `<fn>`) routes cross-bank JSL callers
+    # past the wrapper, leaving DB at the caller's bank. See
+    # `recompiler/v2/wrapper_autoroute.py` for the full diagnosis.
+    print()
+    print("Auto-routing SMW DB-transition wrappers...")
+    wrapper_fixes = autoroute_wrappers(parsed, name_map, cross_bank_names, rom)
+    print(format_fix_summary(wrapper_fixes))
 
     # Promote cross-bank `name` decls into target bank's emit entries.
     # Skip when the bank already has either (a) an entry at the same PC,
