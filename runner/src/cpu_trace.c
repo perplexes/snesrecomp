@@ -1432,6 +1432,9 @@ void cpu_trace_db_change(CpuState *cpu, uint32_t pc24, uint8_t old_db,
         char tag[64];
         snprintf(tag, sizeof(tag), "DB-WATCH HIT $%02X (was $%02X) at PC $%06X",
                  new_db, old_db, pc24);
+        /* One-shot: disarm before dumping so a corruption loop cycling DB
+         * through the watched value can't restream the ring 60×/sec. */
+        cpu_trace_set_db_watch(new_db, 0);
         cpu_trace_dump_dbpb(tag);
         cpu_trace_dump_recent(tag, 256);
     }
