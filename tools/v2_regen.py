@@ -44,6 +44,10 @@ from v2.tail_call_autoroute import (  # noqa: E402
     detect_and_route as autoroute_tail_calls,
     format_fix_summary as format_tail_call_summary,
 )
+from v2.exit_mx_autoroute import (  # noqa: E402
+    detect_and_route as autoroute_exit_mx,
+    format_fix_summary as format_exit_mx_summary,
+)
 
 
 _BANK_CFG_RE = re.compile(r'bank([0-9a-fA-F]+)\.cfg$')
@@ -117,6 +121,19 @@ def main() -> int:
     print("Auto-detecting tail-call fallthrough sites...")
     tail_call_fixes = autoroute_tail_calls(parsed, rom)
     print(format_tail_call_summary(tail_call_fixes))
+
+    # Auto-detect leaf-function exit-(M, X) state mutations. Pattern:
+    # cfg `func F` whose decoded body has NO JSR/JSL inside AND whose
+    # RTS/RTL terminators all exit with the same (M, X) != entry (M, X)
+    # — typically a small SEP/REP-then-RTS leaf. The decoder otherwise
+    # assumes callees preserve (M, X), miscoding callers' post-call
+    # operand widths. See `recompiler/v2/exit_mx_autoroute.py` for why
+    # this is leaf-only (the unrestricted fixpoint version regressed
+    # GraphicsDecompress on 2026-05-03 and was reverted to opt-in).
+    print()
+    print("Auto-detecting leaf-function exit-(M, X) mutations...")
+    exit_mx_fixes = autoroute_exit_mx(parsed, rom)
+    print(format_exit_mx_summary(exit_mx_fixes))
 
     # Promote cross-bank `name` decls into target bank's emit entries.
     # Skip when the bank already has either (a) an entry at the same PC,

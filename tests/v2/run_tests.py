@@ -38,6 +38,7 @@ TEST_MODULES = [
     'test_dispatcher_phk_per_jml',
     'test_wrapper_autoroute',
     'test_tail_call_autoroute',
+    'test_exit_mx_autoroute',
 ]
 
 
