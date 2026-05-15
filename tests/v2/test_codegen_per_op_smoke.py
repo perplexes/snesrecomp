@@ -225,6 +225,52 @@ def test_call_long_emits_function_call():
     assert "bank_7E_8034" in s
 
 
+def test_call_rejects_sub_8000_lorom_target():
+    """Sub-$8000 LoROM addresses are RAM/registers, never ROM code. A
+    Call decoded with such a target arose from the decoder following
+    unreachable bytes past an RTS — skip emit so the linker doesn't
+    need a hand-written stub. Regression for chore/cleanup A1."""
+    from v2.codegen import set_name_resolver
+    set_name_resolver({})  # ensure no exemption
+    op = Call(target=0x030E8C, long=True)
+    s = _joined(emit_op(op))
+    assert "not a valid LoROM" in s
+    assert "bank_03_0E8C" not in s
+    assert "sub_03_0e8c" not in s
+
+
+def test_call_rejects_out_of_rom_target():
+    """Target whose canonical LoROM offset is beyond the ROM image
+    extent is invalid. Tests rule 2 of _is_invalid_lorom_call_target."""
+    from v2.codegen import set_name_resolver, set_rom_size
+    set_name_resolver({})
+    set_rom_size(0x80000)  # 512 KB (SMW size)
+    try:
+        op = Call(target=0x24222F, long=True)  # bank $24 way past SMW extent
+        s = _joined(emit_op(op))
+        assert "not a valid LoROM" in s
+        assert "bank_24_222F" not in s
+    finally:
+        set_rom_size(0)  # reset for other tests
+
+
+def test_call_exempts_cfg_named_out_of_rom_target():
+    """Out-of-ROM targets WITH an explicit cfg `name` entry must still
+    emit a normal call — these are HLE replacements implemented in
+    hand-written C (e.g. SmwRunDecompressFromWRAM at $7F:8000)."""
+    from v2.codegen import set_name_resolver, set_rom_size
+    set_name_resolver({0x7F8000: "SmwRunDecompressFromWRAM"})
+    set_rom_size(0x80000)
+    try:
+        op = Call(target=0x7F8000, long=True)
+        s = _joined(emit_op(op))
+        assert "SmwRunDecompressFromWRAM" in s
+        assert "not a valid LoROM" not in s
+    finally:
+        set_name_resolver({})
+        set_rom_size(0)
+
+
 def test_return_short_emits_return_stmt():
     op = Return(long=False)
     s = _joined(emit_op(op))

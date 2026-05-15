@@ -32,6 +32,8 @@ from snes65816 import load_rom  # noqa: E402
 from v2.cfg_loader import load_bank_cfg  # noqa: E402
 from v2.codegen import (  # noqa: E402
     set_name_resolver,
+    set_rom_size,
+    take_rejected_call_targets,
     take_unresolved_call_targets,
     take_unresolved_goto_targets,
 )
@@ -63,6 +65,7 @@ def main() -> int:
     args = p.parse_args()
 
     rom = load_rom(args.rom)
+    set_rom_size(len(rom))
     cfg_dir = pathlib.Path(args.cfg_dir)
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -706,6 +709,14 @@ def main() -> int:
                   f"{f.branch_mnem} -> {taken_str} -> ${f.live_pc24:06X}  "
                   f"[dead -> ${f.dead_pc24:06X}]  "
                   f"in ${f.func_entry_pc24:06X} M{f.entry_m}X{f.entry_x}")
+
+    rejected = take_rejected_call_targets()
+    if rejected:
+        print()
+        print(f"Rejected JSR/JSL targets (out-of-LoROM, decoder followed "
+              f"garbage operands) — {len(rejected)} unique addresses:")
+        for addr in sorted(rejected):
+            print(f"  ${addr:06X}")
 
     print()
     print(f"v2_regen: {succeeded}/{total} banks emitted")

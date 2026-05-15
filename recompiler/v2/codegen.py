@@ -59,6 +59,54 @@ _NAME_RESOLVER: Dict[int, str] = {}
 # multiple C bodies.
 _UNRESOLVED_CALL_TARGETS: set = set()
 
+# Set by v2_regen via set_rom_size(). Used by _emit_call to validate
+# JSR/JSL target addresses against the LoROM mapping. Targets that
+# resolve to RAM (pc < $8000) or beyond the ROM extent arise from the
+# decoder following unreachable bytes past an RTS (the bytes happen to
+# look like a JSL with garbage operands) — they would crash on real
+# hardware too. Skipping the call emit avoids the need for hand-written
+# stub functions in cfg.
+_ROM_SIZE: int = 0
+_REJECTED_CALL_TARGETS: set = set()
+
+
+def set_rom_size(size: int) -> None:
+    """Set the ROM size used for JSR/JSL target validation."""
+    global _ROM_SIZE
+    _ROM_SIZE = int(size)
+
+
+def take_rejected_call_targets() -> set:
+    """Return + clear the set of Call targets rejected as out-of-ROM.
+    Diagnostic for v2_regen + tests."""
+    global _REJECTED_CALL_TARGETS
+    out = _REJECTED_CALL_TARGETS
+    _REJECTED_CALL_TARGETS = set()
+    return out
+
+
+def _is_invalid_lorom_call_target(addr_24: int) -> bool:
+    """True when addr_24 cannot be a valid LoROM code target.
+
+    Two structural rejections, both independent of any cfg directive:
+      1. pc < $8000 — LoROM addresses $00-$7F:$0000-$7FFF are
+         RAM/registers, never ROM code. (Mirrors at $80-$BF too.)
+      2. (canonical_bank * $8000 + pc - $8000) >= rom_size — target
+         byte is beyond the ROM image extent.
+
+    With _ROM_SIZE unset (== 0) we only apply rule 1 to stay safe in
+    unit-test contexts that don't load a ROM.
+    """
+    pc = addr_24 & 0xFFFF
+    if pc < 0x8000:
+        return True
+    if _ROM_SIZE > 0:
+        canon_bank = (addr_24 >> 16) & 0x7F
+        offset = canon_bank * 0x8000 + (pc - 0x8000)
+        if offset >= _ROM_SIZE:
+            return True
+    return False
+
 # NOTE (2026-05-02): the `_UNRESOLVED_GOTO_TARGETS` machinery has been
 # RETIRED. Auto-promoting arbitrary jump targets into separate C
 # functions split asm routines across C scopes and stranded their
@@ -856,6 +904,21 @@ def _emit_call(op: Call) -> List[str]:
     if op.target is None:
         return ["/* Call: target unknown — caller dispatches */"]
     addr = op.target & 0xFFFFFF
+    # Reject Calls whose target is structurally out of LoROM AND has no
+    # cfg name. With a cfg name the user has explicitly declared an HLE
+    # or hand-written backing (e.g. SmwRunDecompressFromWRAM at $7F:8000
+    # is implemented in src/gen_stubs.c). Without a name, the JSL was
+    # emitted because the decoder followed unreachable bytes past an
+    # RTS and the operand bytes happened to look like a JSL — skipping
+    # the emit avoids generating a trap stub for code that will never
+    # actually run. To clean up the cfg `name`+`void` stub blocks for
+    # similar dead-code targets, delete the cfg entries and re-regen —
+    # this gate then rejects them in subsequent runs.
+    if _is_invalid_lorom_call_target(addr) and addr not in _NAME_RESOLVER:
+        _REJECTED_CALL_TARGETS.add(addr)
+        return [f"/* Call: target ${addr:06X} not a valid LoROM code "
+                f"address and no cfg name — skipped (decoder followed "
+                f"garbage operand past an RTS) */"]
     suffix = _variant_suffix(op.entry_m, op.entry_x)
     base_name = _NAME_RESOLVER.get(addr)
     if base_name is None:
