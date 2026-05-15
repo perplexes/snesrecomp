@@ -9,15 +9,17 @@ from v2.emit_function import emit_function  # noqa: E402
 def test_linear_function_signature_and_return():
     """A trivial LDA #$05; STA $00; RTS function.
 
-    Expected shape (post-RecompReturn ABI 2026-05-02):
+    Expected shape (current emit — post-width-aware-A-helper 2026-04):
         RecompReturn bank_00_8000_M1X1(CpuState *cpu) {
           L_8000_M1X1:
+            cpu_trace_block(cpu, 0x008000);
             uint8 _v1 = 0x5;
-            cpu->A = _v1;
-            uint16 _v2 = (uint16)cpu->A;
+            cpu_write_a_m(cpu, (uint16)(_v1));   /* width-aware A write */
+            ...
+            uint16 _v2 = cpu_read_a16(cpu);      /* width-aware A read */
             cpu_write8(cpu, 0x7E, ..., _v2);
-            { uint8 _ps = cpu->pending_skip; cpu->pending_skip = 0;
-              return (RecompReturn)_ps; /* RTS */ }
+            { RecompReturn _ps = _pending_skip; ...
+              return _ps; /* RTS */ }
           return RECOMP_RETURN_NORMAL;
         }
     """
@@ -28,11 +30,14 @@ def test_linear_function_signature_and_return():
 
     assert "RecompReturn bank_00_8000_M1X1(CpuState *cpu)" in src
     assert "L_8000_M1X1:" in src
-    assert "cpu->A" in src
+    # A-register touched (via width-aware helper, not a literal cpu->A=).
+    assert "cpu_write_a_m" in src
+    assert "cpu_read_a16" in src
     assert "cpu_write8" in src
     # Function returns RecompReturn — Return ops consume pending_skip;
     # exit-via-fallback returns NORMAL directly.
-    assert "return (RecompReturn)" in src or "return RECOMP_RETURN_NORMAL" in src
+    assert "return _ps" in src
+    assert "return RECOMP_RETURN_NORMAL" in src
 
 
 def test_cond_branch_emits_label_targets():

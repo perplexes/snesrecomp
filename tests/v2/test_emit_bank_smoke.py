@@ -26,14 +26,21 @@ def test_two_entry_bank_emits_both_functions():
 
 
 def test_default_func_name_when_none_specified():
-    """BankEntry.name = None → emit_function uses bank_BB_AAAA naming."""
+    """BankEntry.name = None → emit_function uses bank_BB_AAAA naming.
+
+    Post-RecompReturn ABI (2026-05-02) the primary function signature is
+    `RecompReturn ...(CpuState *cpu)` with a variant suffix
+    (`_M{m}X{x}`). The plain `void`-typed shim is only emitted for cfg-
+    named entries (so external callers can invoke without picking a
+    variant); auto-named entries skip the shim.
+    """
     rom = make_lorom_bank0({
         0x8000: bytes([0x60]),  # RTS
     })
     src = emit_bank(rom, bank=0x01, entries=[
         BankEntry(name=None, start=0x8000),
     ])
-    assert "void bank_01_8000(CpuState *cpu)" in src
+    assert "RecompReturn bank_01_8000_M1X1(CpuState *cpu)" in src
 
 
 def test_emitted_bank_is_brace_balanced():
