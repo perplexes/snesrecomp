@@ -107,26 +107,6 @@ func A 8000
         os.unlink(path)
 
 
-def test_verbatim_block_captured():
-    path = _write("""\
-bank = 00
-verbatim_start
-void hand_written(void) {
-  /* opaque table */
-}
-verbatim_end
-func A 8000
-""")
-    try:
-        cfg = load_bank_cfg(path)
-        assert len(cfg.verbatim_blocks) == 1
-        assert "void hand_written(void) {" in cfg.verbatim_blocks[0]
-        assert "/* opaque table */" in cfg.verbatim_blocks[0]
-        assert "verbatim_start" not in cfg.verbatim_blocks[0]
-    finally:
-        os.unlink(path)
-
-
 def test_missing_bank_line_raises():
     path = _write("""\
 func A 8000

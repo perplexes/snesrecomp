@@ -23,9 +23,6 @@ v2 KEEPS:
   in funcs.h (Phase 6e/f). For now we just retain them.
 - `exclude_range <start> <end>` — data region carved out of decode.
 - `data_region <bank> <start> <end>` — same idea, cross-bank.
-- `verbatim_start` / `verbatim_end` — hand-written C inlined at the
-  top of the bank file (e.g. dispatch tables that aren't recompiler
-  output).
 
 Public API:
     load_bank_cfg(path: str) -> BankCfg
@@ -63,7 +60,6 @@ class BankCfg:
     names: List[NameDecl] = field(default_factory=list)
     exclude_ranges: List[Tuple[int, int]] = field(default_factory=list)
     data_regions: List[Tuple[int, int, int]] = field(default_factory=list)  # (bank, start, end)
-    verbatim_blocks: List[str] = field(default_factory=list)
     # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
     # exit (m, x) state of a function at that PC. Decoder uses this to
     # resume callers after JSR/JSL with the correct (m, x) instead of
@@ -97,25 +93,10 @@ def load_bank_cfg(path: str) -> BankCfg:
     have v1-only directives the v2 pipeline doesn't need).
     """
     cfg = BankCfg(bank=-1)
-    in_verbatim = False
-    verbatim_buf: List[str] = []
 
     with open(path, 'r', encoding='utf-8', errors='replace') as fp:
         for raw in fp:
             line = raw.rstrip('\n')
-
-            # Verbatim blocks pass through unchanged.
-            if in_verbatim:
-                if line.strip() == 'verbatim_end':
-                    in_verbatim = False
-                    cfg.verbatim_blocks.append('\n'.join(verbatim_buf))
-                    verbatim_buf = []
-                else:
-                    verbatim_buf.append(line)
-                continue
-            if line.strip() == 'verbatim_start':
-                in_verbatim = True
-                continue
 
             # Strip comments + leading whitespace for everything else.
             stripped = _strip_comment(line).strip()
