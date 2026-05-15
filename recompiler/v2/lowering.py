@@ -407,14 +407,18 @@ def _h_pei(insn, vf):
 
 
 def _h_mvn(insn, vf):
-    src_bank = insn.operand & 0xFF
-    dst_bank = (insn.operand >> 8) & 0xFF
+    # Binary encoding is `54 <DST_BANK> <SRC_BANK>` (see snes9x cpuops.cpp
+    # Op54X1: first Immediate8 → Registers.DB = destination, second → SrcBank).
+    # The decoder reads the two operand bytes little-endian into insn.operand,
+    # so the low byte is DST_BANK and the high byte is SRC_BANK.
+    dst_bank = insn.operand & 0xFF
+    src_bank = (insn.operand >> 8) & 0xFF
     return [BlockMove(direction='mvn', src_bank=src_bank, dst_bank=dst_bank)]
 
 
 def _h_mvp(insn, vf):
-    src_bank = insn.operand & 0xFF
-    dst_bank = (insn.operand >> 8) & 0xFF
+    dst_bank = insn.operand & 0xFF
+    src_bank = (insn.operand >> 8) & 0xFF
     return [BlockMove(direction='mvp', src_bank=src_bank, dst_bank=dst_bank)]
 
 
