@@ -304,6 +304,136 @@ def test_cfg_declared_exit_mx_seeds_callee_map_and_suppresses_auto():
     assert cfg.exit_mx_at_per_variant == []
 
 
+# ── Dispatch-terminator class (Layer1_Init shape) ─────────────────────
+
+def test_dispatch_terminator_routes_via_handler_exits():
+    """A function ending with `JSL <helper>; <table>` has NO RTS in its
+    body — the dispatch JSL is the terminator. Without this fix,
+    `analyze_function_exit_mx` returned (None, None) and the auto-
+    router skipped the function entirely. Class fix: extend
+    `analyze_function_exit_mx` to treat the dispatch JSL as an exit
+    point, with effective exit (m, x) equal to the meet of the
+    dispatched handlers' exits at the dispatch site's (m, x).
+
+    Layout (canonical SMW `BufferScrollingTiles_Layer1_Init` shape):
+
+        $8000  Dispatcher: SEP #$30 ; JSL helper ; <table:2 short>
+        $8500  helper    : PLA ; ASL A ; TAY ; JMP (table,X)
+        $85AA  Handler1  : RTL          (preserves m, x — exits (1, 1)
+                                         at entry (1, 1))
+        $85BB  Handler2  : RTL          (same)
+
+    At the dispatch JSL site, m=1, x=1 (set by the prior SEP #$30).
+    Both handlers entered at (1, 1) exit at (1, 1). Dispatcher exit
+    is (1, 1) for every entry variant. The (1, 1) → (1, 1) case is
+    no-mutation (already the decoder's default-preserve assumption),
+    so it isn't recorded. The other three variants ARE mutations
+    and must be recorded so callers entering at those (em, ex) get
+    re-routed to the post-call (1, 1) label.
+
+    This is the root-cause class of the 2026-05-16
+    `BufferScrollingTiles_Layer2_Init_M0X0` M/X claim verifier trip
+    (caller `InitializeLevelLayer1And2Tilemaps_M1X1` tracked m=0, x=0
+    after `JSL Layer1_Init` because the auto-router never recorded an
+    exit-(m, x) for the dispatcher).
+    """
+    rom = make_lorom_bank0({
+        # Dispatcher: SEP #$30 ; JSL $00:8500 ; .dw $85AA, $85BB
+        0x8000: bytes([0xE2, 0x30,                # SEP #$30
+                       0x22, 0x00, 0x85, 0x00,    # JSL $00:8500
+                       0xAA, 0x85,                # table[0] -> $85AA
+                       0xBB, 0x85]),              # table[1] -> $85BB
+        # Helper (canonical short-table dispatch signature):
+        # PLA ; ASL A ; TAY ; JMP ($1000,X)
+        0x8500: bytes([0x68, 0x0A, 0xA8, 0x7C, 0x00, 0x10]),
+        # Handlers: bare RTL, preserve entry m, x.
+        0x85AA: bytes([0x6B]),
+        0x85BB: bytes([0x6B]),
+    })
+    Dispatcher = _BankEntry(name='Dispatcher', start=0x8000)
+    Handler1   = _BankEntry(name='Handler1',   start=0x85AA)
+    Handler2   = _BankEntry(name='Handler2',   start=0x85BB)
+    cfg = _BankCfg(bank=0x00, entries=[Dispatcher, Handler1, Handler2])
+
+    # Must pass dispatch_helpers — without it the decoder can't see the
+    # JSL <table> pattern and would misdecode the table bytes as
+    # garbage, exactly matching the pre-fix behaviour.
+    dispatch_helpers = {0x008500: 'short'}
+
+    detect_and_route([(0x00, 'bank00.cfg', cfg)], rom,
+                     dispatch_helpers=dispatch_helpers)
+
+    pv = _per_variant_set(cfg)
+
+    # Handlers preserve entry (m, x) — no records for either handler.
+    assert not any(t[1] in (0x85AA, 0x85BB) for t in pv)
+
+    # Dispatcher: at the JSL terminator the site (m, x) = (1, 1) post-
+    # SEP, and handlers exit (1, 1). Effective exit is (1, 1) for
+    # every entry variant. Mutating entries get records; (1, 1) entry
+    # matches exit and is absent.
+    assert (0x00, 0x8000, 0, 0, 1, 1) in pv
+    assert (0x00, 0x8000, 0, 1, 1, 1) in pv
+    assert (0x00, 0x8000, 1, 0, 1, 1) in pv
+    assert (0x00, 0x8000, 1, 1, 1, 1) not in pv
+
+
+def test_dispatch_terminator_ambiguous_handlers_skipped():
+    """Two handlers exiting with different (m, x) at the same dispatch
+    site → ambiguous exit for the dispatcher → no per-variant record.
+
+    This is the soundness gate: when handlers disagree, we don't
+    paper over with a guess; the dispatcher stays unrouted and the
+    caller falls back to its pre-call assumption."""
+    rom = make_lorom_bank0({
+        # Dispatcher: SEP #$30 ; JSL $00:8500 ; .dw $85AA, $85BB
+        0x8000: bytes([0xE2, 0x30,
+                       0x22, 0x00, 0x85, 0x00,
+                       0xAA, 0x85,
+                       0xBB, 0x85]),
+        # Helper
+        0x8500: bytes([0x68, 0x0A, 0xA8, 0x7C, 0x00, 0x10]),
+        # Handler1 exits m=0, x=0
+        0x85AA: bytes([0xC2, 0x30, 0x6B]),  # REP #$30 ; RTL
+        # Handler2 exits m=1, x=1 (preserves entry — no REP/SEP)
+        0x85BB: bytes([0x6B]),              # RTL
+    })
+    Dispatcher = _BankEntry(name='Dispatcher', start=0x8000)
+    Handler1   = _BankEntry(name='Handler1',   start=0x85AA)
+    Handler2   = _BankEntry(name='Handler2',   start=0x85BB)
+    cfg = _BankCfg(bank=0x00, entries=[Dispatcher, Handler1, Handler2])
+
+    detect_and_route([(0x00, 'bank00.cfg', cfg)], rom,
+                     dispatch_helpers={0x008500: 'short'})
+
+    pv = _per_variant_set(cfg)
+    # No dispatcher records — handlers disagree at (1, 1) site:
+    # Handler1 exits (0, 0); Handler2 exits (1, 1).
+    assert not any(t[1] == 0x8000 for t in pv)
+
+
+def test_dispatch_terminator_unknown_handler_skipped():
+    """Handler not cfg-declared → callee_exit_mx has no entry for it →
+    dispatcher's exit is unknown → no per-variant record. The
+    auto-router refuses to guess."""
+    rom = make_lorom_bank0({
+        0x8000: bytes([0xE2, 0x30,
+                       0x22, 0x00, 0x85, 0x00,
+                       0xAA, 0x85]),  # one table entry → $85AA
+        0x8500: bytes([0x68, 0x0A, 0xA8, 0x7C, 0x00, 0x10]),
+        0x85AA: bytes([0xC2, 0x30, 0x6B]),  # REP #$30 ; RTL
+    })
+    # NOTE: Handler1 NOT declared as a cfg func entry.
+    Dispatcher = _BankEntry(name='Dispatcher', start=0x8000)
+    cfg = _BankCfg(bank=0x00, entries=[Dispatcher])
+
+    detect_and_route([(0x00, 'bank00.cfg', cfg)], rom,
+                     dispatch_helpers={0x008500: 'short'})
+
+    # No record for the dispatcher: handler exit unknown.
+    assert cfg.exit_mx_at_per_variant == []
+
+
 # ── Bounded iteration ─────────────────────────────────────────────────
 
 def test_iteration_terminates_for_self_recursive():

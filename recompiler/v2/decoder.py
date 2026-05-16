@@ -863,14 +863,35 @@ def _dedupe_by_pcmx(graph: 'FunctionDecodeGraph') -> None:
         graph.entry = remap[graph.entry]
 
 
-def analyze_function_exit_mx(graph: 'FunctionDecodeGraph'
+def analyze_function_exit_mx(graph: 'FunctionDecodeGraph',
+                             callee_exit_mx: Optional[Dict] = None,
                              ) -> 'Tuple[Optional[int], Optional[int]]':
     """Compute the (m, x) state at which a function returns to its caller.
 
-    Walks every decoded RTS/RTL/RTI in `graph` and takes the meet of
-    their entry (m, x) — RTS/RTL/RTI don't modify M/X, so each
-    terminator's `(insn.m_flag, insn.x_flag)` IS the (m, x) at the
-    moment of return.
+    Walks every terminator in `graph` and takes the meet of the (m, x)
+    state at which control leaves the function:
+
+      - RTS/RTL/RTI: don't modify M/X, so each terminator's
+        `(insn.m_flag, insn.x_flag)` IS the (m, x) at the moment of
+        return.
+
+      - JSL/JML dispatch terminator (`insn.dispatch_entries` populated
+        and no fall-through successors): the dispatcher transfers
+        control to a handler which RTLs back to OUR caller. The
+        effective exit state at this terminator is whichever (m, x)
+        the dispatched handler RTLs with. Requires `callee_exit_mx`
+        to have an entry for each table target keyed by the dispatch
+        site's (m, x); if any handler's exit is unknown we return
+        `(None, None)` (retry on a later auto-router pass once more
+        callees converge).
+
+        Soundness note: the JSL dispatch helper itself runs in a
+        canonical state (e.g. SMW's `$00:86FA` runs with the
+        dispatcher's `(m, x)` and forwards without restoring P), so
+        the handler is entered with the dispatch SITE's (m, x). Each
+        handler's `callee_exit_mx[(target, site_m, site_x)]` IS the
+        handler's RTL (m, x), which becomes our function's effective
+        exit.
 
     If all return paths exit with the same (m, x), returns that pair.
     If any two return paths disagree, the corresponding component is
@@ -885,20 +906,61 @@ def analyze_function_exit_mx(graph: 'FunctionDecodeGraph'
     have_any = False
     m_ambig = False
     x_ambig = False
-    for di in graph.insns.values():
-        ins = di.insn
-        if ins.mnem not in ('RTS', 'RTL', 'RTI'):
-            continue
-        em = ins.m_flag & 1
-        ex = ins.x_flag & 1
+
+    def _accumulate(em: int, ex: int) -> None:
+        nonlocal exit_m, exit_x, have_any, m_ambig, x_ambig
         if not have_any:
             exit_m, exit_x = em, ex
             have_any = True
-            continue
+            return
         if not m_ambig and exit_m != em:
             m_ambig = True
         if not x_ambig and exit_x != ex:
             x_ambig = True
+
+    for di in graph.insns.values():
+        ins = di.insn
+        if ins.mnem in ('RTS', 'RTL', 'RTI'):
+            _accumulate(ins.m_flag & 1, ins.x_flag & 1)
+            continue
+        # Dispatch terminator: JSL/JML with no successors and a
+        # populated dispatch table. The function transfers control to
+        # a handler that eventually RTLs back to our caller.
+        is_dispatch_term = (
+            getattr(ins, 'dispatch_entries', None) is not None
+            and len(di.successors) == 0
+            and ins.mnem in ('JSL', 'JMP')  # JMP here means JML (length 4)
+        )
+        if is_dispatch_term:
+            if callee_exit_mx is None:
+                # No callee-exit info → can't propagate handler exits.
+                # Return ambiguous; auto-router will skip this entry
+                # variant entirely, which is the safe default.
+                return (None, None)
+            site_m = ins.m_flag & 1
+            site_x = ins.x_flag & 1
+            dispatcher_bank = (ins.addr >> 16) & 0xFF
+            kind = getattr(ins, 'dispatch_kind', None)
+            for entry in (ins.dispatch_entries or ()):
+                # Padding entries (0) are recorded by the decoder for
+                # short and long tables; skip them.
+                if entry == 0:
+                    continue
+                if kind == 'long':
+                    tgt_pc24 = entry & 0xFFFFFF
+                else:
+                    # short: 16-bit target in dispatcher's bank.
+                    tgt_pc24 = (dispatcher_bank << 16) | (entry & 0xFFFF)
+                key = (tgt_pc24, site_m, site_x)
+                handler_exit = callee_exit_mx.get(key)
+                if handler_exit is None:
+                    # Handler's exit at this site-(m, x) not yet known.
+                    # Defer — a later auto-router iteration may resolve
+                    # the chain. Stay ambiguous for now.
+                    return (None, None)
+                _accumulate(handler_exit[0] & 1, handler_exit[1] & 1)
+            continue
+
     if m_ambig:
         exit_m = None
     if x_ambig:

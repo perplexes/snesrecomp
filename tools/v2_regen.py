@@ -125,6 +125,46 @@ def main() -> int:
     tail_call_fixes = autoroute_tail_calls(parsed, rom)
     print(format_tail_call_summary(tail_call_fixes))
 
+    # Auto-detect dispatch helpers BEFORE exit-(M, X) autoroute. The
+    # autoroute decoder needs `dispatch_helpers` to recognise SMW's
+    # `JSL <helper>; <data table>` pattern as a dispatch terminator —
+    # otherwise the bytes after the JSL are decoded as garbage
+    # instructions, the function ends with no RTS/RTL/RTI, and
+    # `analyze_function_exit_mx` returns ambiguous. The non-leaf
+    # auto-router needs this signal to route exits for dispatch-
+    # terminator functions like `BufferScrollingTiles_Layer1_Init`.
+    # (Detection is identical to the existing block; it just moved up.)
+    print()
+    print("Auto-detecting JSL dispatch helpers...")
+    dispatch_helpers: dict = {}
+    jsl_targets: set = set()
+    for bank, _cfg_path, cfg in parsed:
+        for entry in cfg.entries:
+            try:
+                graph = decode_function(rom, bank, entry.start,
+                                        entry_m=entry.entry_m,
+                                        entry_x=entry.entry_x,
+                                        end=entry.end)
+            except Exception:
+                continue
+            for di in graph.insns.values():
+                ins = di.insn
+                # JSL or JML (JMP LONG)
+                if ins.mnem == 'JSL':
+                    jsl_targets.add(ins.operand & 0xFFFFFF)
+                elif ins.mnem == 'JMP' and ins.length == 4:
+                    jsl_targets.add(ins.operand & 0xFFFFFF)
+    classified = {'short': 0, 'long': 0}
+    for tgt in jsl_targets:
+        tbank = (tgt >> 16) & 0xFF
+        taddr = tgt & 0xFFFF
+        kind = classify_dispatch_helper(rom, tbank, taddr)
+        if kind:
+            dispatch_helpers[tgt] = kind
+            classified[kind] += 1
+    print(f"  detected {classified['short']} short + {classified['long']} long dispatch helpers "
+          f"(scanned {len(jsl_targets)} JSL/JML targets)")
+
     # Auto-detect leaf-function exit-(M, X) state mutations. Pattern:
     # cfg `func F` whose decoded body has NO JSR/JSL inside AND whose
     # RTS/RTL terminators all exit with the same (M, X) != entry (M, X)
@@ -135,7 +175,8 @@ def main() -> int:
     # GraphicsDecompress on 2026-05-03 and was reverted to opt-in).
     print()
     print("Auto-detecting leaf-function exit-(M, X) mutations...")
-    exit_mx_fixes = autoroute_exit_mx(parsed, rom)
+    exit_mx_fixes = autoroute_exit_mx(parsed, rom,
+                                      dispatch_helpers=dispatch_helpers)
     print(format_exit_mx_summary(exit_mx_fixes))
 
     # Promote cross-bank `name` decls into target bank's emit entries.
@@ -168,42 +209,10 @@ def main() -> int:
 
     set_name_resolver(name_map)
 
-    # Auto-detect dispatch helpers across ALL banks: scan every
-    # cfg-declared function for JSL/JML targets, classify each by
-    # subroutine signature (PLA/PLY + indirect JMP). Result: a
-    # global {target_addr_24 -> 'short'|'long'} map passed into
-    # emit_bank so the decoder treats bytes-after-JSL as a TABLE
-    # instead of garbage instructions.
-    print()
-    print("Auto-detecting JSL dispatch helpers...")
-    dispatch_helpers: dict = {}
-    jsl_targets: set = set()
-    for bank, _cfg_path, cfg in parsed:
-        for entry in cfg.entries:
-            try:
-                graph = decode_function(rom, bank, entry.start,
-                                        entry_m=entry.entry_m,
-                                        entry_x=entry.entry_x,
-                                        end=entry.end)
-            except Exception:
-                continue
-            for di in graph.insns.values():
-                ins = di.insn
-                # JSL or JML (JMP LONG)
-                if ins.mnem == 'JSL':
-                    jsl_targets.add(ins.operand & 0xFFFFFF)
-                elif ins.mnem == 'JMP' and ins.length == 4:
-                    jsl_targets.add(ins.operand & 0xFFFFFF)
-    classified = {'short': 0, 'long': 0}
-    for tgt in jsl_targets:
-        tbank = (tgt >> 16) & 0xFF
-        taddr = tgt & 0xFFFF
-        kind = classify_dispatch_helper(rom, tbank, taddr)
-        if kind:
-            dispatch_helpers[tgt] = kind
-            classified[kind] += 1
-    print(f"  detected {classified['short']} short + {classified['long']} long dispatch helpers "
-          f"(scanned {len(jsl_targets)} JSL/JML targets)")
+    # NOTE: dispatch_helpers was discovered earlier (above
+    # autoroute_exit_mx) so the M/X exit-state auto-router can see
+    # dispatch terminators. Re-use the same map for variant discovery
+    # + per-bank emit below.
 
     # Pre-pass: discover (callee_addr_24, m, x) variants needed.
     #

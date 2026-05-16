@@ -100,7 +100,8 @@ _MX_COMBOS: List[Tuple[int, int]] = [(0, 0), (0, 1), (1, 0), (1, 1)]
 
 def _decode_variant_exit(rom: bytes, bank: int, addr16: int,
                          em: int, ex: int, end,
-                         callee_exit_mx):
+                         callee_exit_mx,
+                         dispatch_helpers=None):
     """Decode (bank, addr16) with entry (em, ex) and the provided
     callee_exit_mx for any JSR/JSL fall-through. Returns (exit_m,
     exit_x) if the body decoded cleanly with an unambiguous exit
@@ -118,6 +119,12 @@ def _decode_variant_exit(rom: bytes, bank: int, addr16: int,
         this function inherits their state at JSR/JSL fall-through.
       - `analyze_function_exit_mx` returns None for ambiguous exits
         (multiple RTS paths disagree); we skip those.
+      - `dispatch_helpers` passed in: lets the decoder recognise SMW's
+        `JSL <helper>; <data table>` pattern as a dispatch terminator
+        instead of misdecoding the table bytes as garbage code. With
+        the helper map, dispatch JSLs land in the decode graph with
+        `dispatch_entries` set and no fall-through successors, and
+        `analyze_function_exit_mx` propagates exits through them.
 
     The 2026-05-03 iterative-fixpoint attempt regressed
     `GraphicsDecompress` because intermediate (m, x) values polluted
@@ -131,18 +138,20 @@ def _decode_variant_exit(rom: bytes, bank: int, addr16: int,
     try:
         graph = decode_function(rom, bank, addr16,
                                 entry_m=em, entry_x=ex, end=end,
+                                dispatch_helpers=dispatch_helpers,
                                 callee_exit_mx=callee_exit_mx)
     except Exception:
         return None
     if not graph.insns:
         return None
-    exit_m, exit_x = analyze_function_exit_mx(graph)
+    exit_m, exit_x = analyze_function_exit_mx(graph, callee_exit_mx)
     if exit_m is None or exit_x is None:
         return None
     return (exit_m & 1, exit_x & 1)
 
 
-def detect_and_route(parsed, rom: bytes) -> List[FixRecord]:
+def detect_and_route(parsed, rom: bytes,
+                     dispatch_helpers=None) -> List[FixRecord]:
     """Auto-detect per-variant function exit-(M, X) state.
 
     Algorithm:
@@ -222,7 +231,8 @@ def detect_and_route(parsed, rom: bytes) -> List[FixRecord]:
 
                     exit_pair = _decode_variant_exit(
                         rom, bank, addr16, em, ex, entry.end,
-                        callee_exit_mx)
+                        callee_exit_mx,
+                        dispatch_helpers=dispatch_helpers)
                     if exit_pair is None:
                         continue  # ambiguous / failed; retry later
 
