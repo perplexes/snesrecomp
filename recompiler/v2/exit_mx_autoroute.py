@@ -157,42 +157,61 @@ def detect_and_route(parsed, rom: bytes,
     Algorithm:
 
     1. Seed `callee_exit_mx` from hand-written cfg `exit_mx_at`
-       directives (broadcast 4-tuple → all 4 entry variants).
+       directives (broadcast 4-tuple → all 4 entry variants). These
+       seeds are IMMUTABLE for the duration of the analysis — the
+       autoroute never overrides a hand-written hint.
 
-    2. Iterate up to `_MAX_ITERS` passes. Each pass walks every cfg
-       `func` entry and tries to determine its exit (m, x) for any
-       entry variant not yet recorded in `callee_exit_mx`:
+    2. Iterate up to `_MAX_ITERS` passes. Each pass RE-DERIVES every
+       cfg `func` entry's exit at every entry variant (skipping
+       seeded keys) using the current `callee_exit_mx`. If the
+       derived exit differs from the previously stored one, update
+       `callee_exit_mx` and mark the pass dirty.
 
-         - Decode the function under entry (em, ex) with the current
-           `callee_exit_mx` available.
-         - If the decode succeeds and `analyze_function_exit_mx`
-           returns a determinate exit, commit it: append to
-           `callee_exit_mx` and (if mutating) to
-           `cfg.exit_mx_at_per_variant`.
-         - If decode fails or exit is ambiguous, skip — possibly try
-           again in a later pass when more callee exits are known.
-
-    3. Stop when a pass commits nothing new (fixpoint), or after
+    3. Stop when a pass changes nothing (fixpoint), or after
        `_MAX_ITERS` passes (defensive bound).
+
+    4. After fixpoint, emit `cfg.exit_mx_at_per_variant` entries for
+       every (target, em, ex) whose final exit differs from entry
+       (the "mutating" set).
 
     Per-variant emission: each `(target, entry_m, entry_x) → (exit_m,
     exit_x)` is recorded individually. The legacy `cfg.exit_mx_at`
     4-tuple broadcast is reserved for hand-written cfg directives;
     auto-detected exits go to `cfg.exit_mx_at_per_variant`.
 
-    Soundness: this is NOT the unconstrained 2026-05-03 fixpoint
-    attempt that regressed `GraphicsDecompress`. The differences:
+    Soundness — why re-derivation is now correct:
 
-      - Information flow is monotonic: a committed (em, ex) -> exit
-        is never revised by a later iteration.
-      - PHP/PLP bracketing is modeled by the decoder
-        (snesrecomp 73e3d26); the previous PHP/PLP gap that biased
-        the 2026-05-03 fixpoint is closed.
+      - PHP/PLP bracketing is modeled by the decoder (snesrecomp
+        73e3d26); the previous PHP/PLP gap that biased the
+        2026-05-03 fixpoint is closed.
       - Ambiguous exits (analyze_function_exit_mx returns None) are
         skipped, not papered over with a guess.
+      - Each pass's analysis is a function of the current
+        callee_exit_mx (no other mutable state), so any oscillation
+        would have to come from a non-monotone update rule — which
+        we don't have.
+
+    Why the previous "commit-once, never revise" rule was buggy:
+
+      Consider `WallRun` (`INX INX REP #$20 ; ... JSR $F465 ; RTS`)
+      and `F465` (`SEP #$20 ; ... RTS`). WallRun at M1X1 entry hits
+      the REP, then JSRs $F465 at em=0, ex=1. The correct chain:
+      F465's exit at (0, 1) is (1, 1) (SEP #$20 forces m=1), so
+      WallRun's post-JSR state is (1, 1) and its RTS exit is (1, 1).
+      But if pass 1 analyses WallRun BEFORE F465 is recorded, the
+      decoder default-preserves the JSR fall-through state and
+      computes WallRun's exit as (0, 1). The old "commit-once" rule
+      then locked that wrong (0, 1) record in even after F465
+      committed (1, 1) in pass 2. Downstream callers of WallRun_M1X1
+      cascade through the wrong post-call state into phantom
+      M0X1-tracked code regions that runtime never reaches at m=0
+      (the 2026-05-16 `RunPlayerBlockCode_00F28C_M0X1` verifier trip
+      was this cascade). Re-deriving per pass fixes the order-
+      dependence.
 
     Hand-written cfg `exit_mx_at` directives win at the same
-    (target_pc24, em, ex) key — by virtue of being seeded FIRST.
+    (target_pc24, em, ex) key — `seeded_keys` are skipped in every
+    re-derivation pass and the per-variant emit step.
 
     Returns the list of `FixRecord` for the build report.
     """
@@ -200,7 +219,7 @@ def detect_and_route(parsed, rom: bytes,
 
     # Seed: cfg-declared 4-tuple exit_mx_at directives broadcast to
     # all 4 entry variants. Hand-written hints take precedence over
-    # auto-detection.
+    # auto-detection — they are immutable for the rest of this run.
     callee_exit_mx: dict = {}
     seeded_keys: Set[Tuple[int, int, int]] = set()
     for bank, _cfg_path, cfg in parsed:
@@ -211,12 +230,13 @@ def detect_and_route(parsed, rom: bytes,
                 callee_exit_mx[key] = (m_val & 1, x_val & 1)
                 seeded_keys.add(key)
 
-    # Iterative fixpoint: commit exits we can determine with the
-    # current callee_exit_mx; each pass may unlock more in deeper
-    # call chains. Bounded for safety — typical SMW converges in 2-3.
-    _MAX_ITERS = 8
+    # Iterative fixpoint with re-derivation. Each pass walks every
+    # cfg entry × every (em, ex); decodes under the current
+    # callee_exit_mx; updates the entry if the derived exit differs
+    # from what's stored. Stops when no entries change.
+    _MAX_ITERS = 12
     for iter_n in range(_MAX_ITERS):
-        any_new = False
+        dirty = False
         for bank, _cfg_path, cfg in parsed:
             for entry in cfg.entries:
                 if not entry.name:
@@ -226,32 +246,62 @@ def detect_and_route(parsed, rom: bytes,
 
                 for em, ex in _MX_COMBOS:
                     key = (target_pc24, em, ex)
-                    if key in callee_exit_mx:
-                        continue  # already known
+                    if key in seeded_keys:
+                        continue  # hand-written hint is authoritative
 
                     exit_pair = _decode_variant_exit(
                         rom, bank, addr16, em, ex, entry.end,
                         callee_exit_mx,
                         dispatch_helpers=dispatch_helpers)
                     if exit_pair is None:
-                        continue  # ambiguous / failed; retry later
+                        # Body decoded but exit is ambiguous, or
+                        # decode failed. Drop any prior record so
+                        # callers fall back to default-preserve
+                        # rather than relying on a stale stored
+                        # value. (Rare in practice — analyzer is
+                        # deterministic given inputs, so this only
+                        # fires when an upstream change introduces
+                        # ambiguity.)
+                        if key in callee_exit_mx:
+                            del callee_exit_mx[key]
+                            dirty = True
+                        continue
 
-                    exit_m, exit_x = exit_pair
-                    callee_exit_mx[key] = (exit_m, exit_x)
-                    any_new = True
+                    prev = callee_exit_mx.get(key)
+                    if prev != exit_pair:
+                        callee_exit_mx[key] = exit_pair
+                        dirty = True
 
-                    if exit_m != em or exit_x != ex:
-                        cfg.exit_mx_at_per_variant.append(
-                            (bank, addr16, em, ex, exit_m, exit_x))
-                        fixes.append(FixRecord(
-                            bank=bank, addr16=addr16,
-                            fn_name=entry.name,
-                            entry_m=em, entry_x=ex,
-                            exit_m=exit_m, exit_x=exit_x,
-                        ))
-
-        if not any_new:
+        if not dirty:
             break
+
+    # Emit per-variant records AFTER fixpoint. Only `mutating`
+    # entries (exit != entry) get cfg records; non-mutating exits
+    # rely on the decoder's default-preserve. Seeded keys are
+    # already covered by the hand-written `exit_mx_at` broadcast.
+    for bank, _cfg_path, cfg in parsed:
+        for entry in cfg.entries:
+            if not entry.name:
+                continue
+            addr16 = entry.start & 0xFFFF
+            target_pc24 = (bank << 16) | addr16
+            for em, ex in _MX_COMBOS:
+                key = (target_pc24, em, ex)
+                if key in seeded_keys:
+                    continue
+                pair = callee_exit_mx.get(key)
+                if pair is None:
+                    continue
+                exit_m, exit_x = pair
+                if exit_m != em or exit_x != ex:
+                    cfg.exit_mx_at_per_variant.append(
+                        (bank, addr16, em, ex, exit_m, exit_x))
+                    fixes.append(FixRecord(
+                        bank=bank, addr16=addr16,
+                        fn_name=entry.name,
+                        entry_m=em, entry_x=ex,
+                        exit_m=exit_m, exit_x=exit_x,
+                    ))
 
     return fixes
 

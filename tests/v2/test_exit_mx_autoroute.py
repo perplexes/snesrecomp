@@ -434,6 +434,64 @@ def test_dispatch_terminator_unknown_handler_skipped():
     assert cfg.exit_mx_at_per_variant == []
 
 
+# ── Fixpoint must be order-independent (re-derive every pass) ─────────
+
+def test_caller_exit_revised_when_callee_exit_known_later():
+    """Pin the WallRun/F465 class:
+
+      Caller F (at $8000): `REP #$20 ; JSR <callee> ; RTS`
+      Callee G (at $8100): `SEP #$20 ; RTS`
+
+    F enters at (em=1, ex=1). After the REP, body is in (0, 1). JSR
+    enters G at (em=0, ex=1). G's exit is (m=1, x=1) (SEP forces m=1).
+    Post-JSR state in F is therefore (1, 1), and F's RTS exits (1, 1)
+    — i.e. F at M1X1 entry → exit (1, 1), no mutation.
+
+    The bug: when the autoroute analysed F before G's exit was
+    recorded, F's decoder default-preserved across the JSR and
+    derived exit (0, 1). The old `commit-once` rule then kept that
+    (0, 1) record forever, even after G committed (1, 1).
+
+    With the fixpoint fix, each pass re-derives F using the current
+    callee_exit_mx. Pass 1: F sees no G record → (0, 1). G commits
+    (1, 1). Pass 2: F sees G record → (1, 1). Pass 3: stable.
+
+    Final committed state: F's M1X1 entry yields no per-variant
+    record (exit equals entry). The bogus (0, 1) record must NOT
+    appear.
+
+    To stress order-dependence, put F BEFORE G in the cfg entry
+    list (the autoroute iterates entries in declared order; F-first
+    is the order that triggered the bug).
+    """
+    rom = make_lorom_bank0({
+        # F at $8000: REP #$20 (C2 20) ; JSR $8100 (20 00 81) ; RTS (60)
+        0x8000: bytes([0xC2, 0x20, 0x20, 0x00, 0x81, 0x60]),
+        # G at $8100: SEP #$20 (E2 20) ; RTS (60)
+        0x8100: bytes([0xE2, 0x20, 0x60]),
+    })
+    F = _BankEntry(name='F', start=0x8000)
+    G = _BankEntry(name='G', start=0x8100)
+    cfg = _BankCfg(bank=0x00, entries=[F, G])  # F BEFORE G
+
+    detect_and_route([(0x00, 'bank00.cfg', cfg)], rom)
+
+    pv = _per_variant_set(cfg)
+
+    # F's M1X1 entry → exit (1, 1), no mutation. Must NOT appear.
+    assert (0x00, 0x8000, 1, 1, 0, 1) not in pv, (
+        "F at M1X1 → (0, 1) is the staleness bug: F was analysed "
+        "before G, default-preserved across JSR, committed (0, 1); "
+        "the fixpoint should re-derive F once G commits (1, 1)."
+    )
+    assert (0x00, 0x8000, 1, 1, 1, 1) not in pv  # no-mutation, no record
+
+    # G's mutating entries record correctly. M1X1 entry: exit (1, 1)
+    # — no mutation, no record. M0X0/M0X1 entries: exit (1, 0)/(1, 1).
+    assert (0x00, 0x8100, 0, 0, 1, 0) in pv
+    assert (0x00, 0x8100, 0, 1, 1, 1) in pv
+
+
 # ── Bounded iteration ─────────────────────────────────────────────────
 
 def test_iteration_terminates_for_self_recursive():
