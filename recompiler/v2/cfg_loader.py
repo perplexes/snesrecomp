@@ -63,8 +63,22 @@ class BankCfg:
     # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
     # exit (m, x) state of a function at that PC. Decoder uses this to
     # resume callers after JSR/JSL with the correct (m, x) instead of
-    # assuming the callee preserves the caller's state.
+    # assuming the callee preserves the caller's state. THIS LIST IS FOR
+    # HAND-WRITTEN cfg DIRECTIVES ONLY — the auto-router populates
+    # `exit_mx_at_per_variant` (below) which is per-entry-variant and
+    # always correct; the 4-tuple broadcast here is preserved for
+    # backward compat with hand-written hints that pre-date the
+    # per-variant work.
     exit_mx_at: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    # Per-entry-variant exit (m, x) tuples populated by the auto-router.
+    # Each entry is (bank, addr16, entry_m, entry_x, exit_m, exit_x).
+    # Consumed by v2_regen.py's callee_exit_mx builder; per-variant
+    # entries OVERRIDE the legacy 4-tuple broadcast for their specific
+    # (target, entry_m, entry_x) keys. This is the proper data model
+    # for functions whose exit depends on entry — the broadcast 4-tuple
+    # is wrong for those (Bug C class, see
+    # docs/ABSTRACT_INTERPRETATION_GAPS.md).
+    exit_mx_at_per_variant: List[Tuple[int, int, int, int, int, int]] = field(default_factory=list)
 
 
 # Token regex helpers

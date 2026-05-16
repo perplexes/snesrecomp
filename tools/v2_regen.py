@@ -383,10 +383,27 @@ def main() -> int:
             # No discovered variants — apply to cfg-default (1, 1).
             callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
             cfg_exit_mx_count += 1
-    if cfg_exit_mx_count:
+
+    # Per-variant exit_mx_at: populated by the auto-router with one
+    # (entry_m, entry_x) → (exit_m, exit_x) tuple per mutating variant.
+    # Per-variant entries OVERRIDE the broadcast 4-tuple at the same
+    # (target, em, ex) key — but cfg-declared 4-tuples are seeded by
+    # the auto-router itself before its own analysis runs, so hand-
+    # written hints stay authoritative.
+    per_variant_count = 0
+    for bank, _cfg_path, cfg in parsed:
+        for (b_id, addr16, em_in, ex_in, ex_m, ex_xf) in \
+                cfg.exit_mx_at_per_variant:
+            target_pc24 = ((b_id & 0xFF) << 16) | (addr16 & 0xFFFF)
+            callee_exit_mx[(target_pc24, em_in & 1, ex_in & 1)] = (
+                ex_m & 1, ex_xf & 1)
+            per_variant_count += 1
+
+    if cfg_exit_mx_count or per_variant_count:
         print()
-        print(f"Loaded {cfg_exit_mx_count} cfg `exit_mx_at` annotations "
-              f"({len(declared_exit_mx)} unique target addresses)")
+        print(f"Loaded {cfg_exit_mx_count} cfg `exit_mx_at` broadcast "
+              f"annotations ({len(declared_exit_mx)} unique targets); "
+              f"{per_variant_count} per-variant overrides")
 
     # Apply per-(m,x) variants to existing cfg entries: for each cfg
     # entry whose target address has more than its declared (m, x)
