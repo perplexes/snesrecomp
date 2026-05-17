@@ -628,8 +628,100 @@ void cpu_trace_clear_px_tripwire(void) {
     memset(&g_px_tripwire, 0, sizeof(g_px_tripwire));
 }
 
+/* Unconditionally count P-mutation emit events (SEP/REP/PHP/PLP/XCE/
+ * RTI). Used by the async-m/x-flag-write tripwire below to distinguish
+ * legitimate (decoder-emitted) flag changes from unexpected (async)
+ * ones. Incremented even when g_px_tripwire is disarmed so the async
+ * tripwire's "did we just see an emitted P-mutation" check stays
+ * accurate. */
+uint64_t g_px_mutation_count = 0;
+MxAsyncTrip g_mx_async_trip;
+
+void cpu_trace_arm_mx_async_check(void) {
+    memset(&g_mx_async_trip, 0, sizeof(g_mx_async_trip));
+    g_mx_async_trip.armed = 1;
+}
+
+void cpu_trace_disarm_mx_async_check(void) {
+    g_mx_async_trip.armed = 0;
+}
+
+int cpu_trace_mx_async_check(CpuState *cpu, uint32_t pc24) {
+    MxAsyncTrip *t = &g_mx_async_trip;
+    if (!t->armed || t->triggered) return 1;
+
+    uint8_t  cur_m     = (uint8_t)(cpu->m_flag & 1);
+    uint8_t  cur_x     = (uint8_t)(cpu->x_flag & 1);
+    uint64_t cur_count = g_px_mutation_count;
+
+    if (!t->initialized) {
+        t->last_m        = cur_m;
+        t->last_x        = cur_x;
+        t->last_px_count = cur_count;
+        t->initialized   = 1;
+        return 1;
+    }
+
+    int flags_changed = (cur_m != t->last_m) || (cur_x != t->last_x);
+    int px_unchanged  = (cur_count == t->last_px_count);
+
+    if (flags_changed && px_unchanged) {
+        /* Latch one-shot. */
+        t->triggered        = 1;
+        extern int snes_frame_counter;
+        t->frame            = snes_frame_counter;
+        t->block_pc24       = pc24;
+        t->prev_m           = t->last_m;
+        t->prev_x           = t->last_x;
+        t->new_m            = cur_m;
+        t->new_x            = cur_x;
+        t->px_count_at_trip = cur_count;
+
+        if (g_recomp_stack_top > 0 && g_recomp_stack[g_recomp_stack_top - 1]) {
+            strncpy(t->func_name, g_recomp_stack[g_recomp_stack_top - 1],
+                    MX_CLAIM_TRIP_FUNC_LEN - 1);
+            t->func_name[MX_CLAIM_TRIP_FUNC_LEN - 1] = 0;
+        }
+        int depth = g_recomp_stack_top;
+        if (depth > MX_CLAIM_TRIP_STACK_DEPTH) depth = MX_CLAIM_TRIP_STACK_DEPTH;
+        t->stack_depth = depth;
+        int skip = g_recomp_stack_top - depth;
+        for (int i = 0; i < depth; i++) {
+            const char *p = g_recomp_stack[skip + i];
+            if (p) {
+                strncpy(t->stack[i], p, MX_CLAIM_TRIP_FUNC_LEN - 1);
+                t->stack[i][MX_CLAIM_TRIP_FUNC_LEN - 1] = 0;
+            } else {
+                t->stack[i][0] = 0;
+            }
+        }
+
+        fprintf(stderr,
+                "[mx_async] FIRED frame=%d block=$%06X func=%s "
+                "flags (%u,%u)->(%u,%u) px_count=%llu (no emit between checkpoints)\n",
+                t->frame, t->block_pc24, t->func_name,
+                t->prev_m, t->prev_x, t->new_m, t->new_x,
+                (unsigned long long)cur_count);
+        fflush(stderr);
+        /* Don't update the snapshot — we want the trip data to remain
+         * stable for later queries. */
+        return 0;
+    }
+
+    /* No trip — update the snapshot for the next checkpoint. */
+    t->last_m        = cur_m;
+    t->last_x        = cur_x;
+    t->last_px_count = cur_count;
+    return 1;
+}
+
 void cpu_trace_px_record(CpuState *cpu, uint32_t pc24, uint8_t source_kind,
                          uint8_t old_p, uint8_t new_p) {
+    /* Count this emit event unconditionally — the async-mx-write
+     * tripwire compares this count across block hooks to distinguish
+     * legitimate (emitted) flag changes from unexpected ones. */
+    g_px_mutation_count++;
+
     if (!g_px_tripwire.armed) return;
 
     /* Always log into the per-tripwire P-mutation ring (independent of
@@ -1016,6 +1108,7 @@ void cpu_trace_block(CpuState *cpu, uint32_t pc24) {
     capture(cpu, pc24, CPU_TR_BLOCK, 0, 0);
     phantom_check(cpu, pc24);
     cpu_trace_block_watch_check(cpu, pc24);
+    cpu_trace_mx_async_check(cpu, pc24);
     /* Stack-range tripwire — fires once when S first leaves the
      * configured range. Disarms after firing to avoid spam. */
     extern uint8_t  g_s_watch_set;
@@ -1964,6 +2057,13 @@ void cpu_trace_arm_default_watches(void) {
      * docs/ABSTRACT_INTERPRETATION_GAPS.md for the model. */
     cpu_trace_arm_mx_claim_check();
     fprintf(stderr, "[cpu_trace] static M/X claim verifier armed\n");
+    /* Auto-arm async m_flag/x_flag write tripwire — catches the class
+     * of bug where something asynchronous (NMI/IRQ state restoration
+     * is the prime suspect, per ISSUES.md DA49 entry) flips
+     * cpu->m_flag or cpu->x_flag without going through an emitted
+     * SEP/REP/PHP/PLP/RTI/XCE block. */
+    cpu_trace_arm_mx_async_check();
+    fprintf(stderr, "[cpu_trace] async M/X flag-write tripwire armed\n");
     /* Auto-arm scoped WRAM tripwire on the BG palette buffer
      * $7E:0700-$070F, the first 16 colors of MainPalette/BackgroundColor.
      *

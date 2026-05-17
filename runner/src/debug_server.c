@@ -5120,6 +5120,69 @@ static void cmd_mx_claim_check_get(const char *args) {
 #endif
 }
 
+/* Async m_flag/x_flag write tripwire — catches mutations of
+ * cpu->m_flag or cpu->x_flag that occur between two cpu_trace_block
+ * hooks WITHOUT a corresponding cpu_trace_px_record (i.e. without
+ * going through an emitted SEP/REP/PHP/PLP/RTI/XCE). The DA49 entry
+ * in ISSUES.md is the canonical example of the class this catches.
+ *
+ *   mx_async_check_arm                    — arm tripwire (clear trip)
+ *   mx_async_check_get                    — return current trip snapshot
+ *   mx_async_check_disarm                 — disarm tripwire
+ */
+static void cmd_mx_async_check_arm(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    cpu_trace_arm_mx_async_check();
+    send_fmt("{\"ok\":1,\"armed\":1}");
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
+static void cmd_mx_async_check_disarm(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    cpu_trace_disarm_mx_async_check();
+    send_fmt("{\"ok\":1,\"armed\":0}");
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
+static void cmd_mx_async_check_get(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    MxAsyncTrip *t = &g_mx_async_trip;
+    static char buf[8192];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"armed\":%u,\"triggered\":%u,\"px_mutation_count\":%llu",
+        (unsigned)t->armed, (unsigned)t->triggered,
+        (unsigned long long)g_px_mutation_count);
+    if (t->triggered) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            ",\"frame\":%d,\"block_pc24\":\"0x%06x\","
+            "\"prev_m\":%u,\"prev_x\":%u,\"new_m\":%u,\"new_x\":%u,"
+            "\"px_count_at_trip\":%llu,"
+            "\"func\":\"%s\",\"stack\":[",
+            t->frame, t->block_pc24,
+            (unsigned)t->prev_m, (unsigned)t->prev_x,
+            (unsigned)t->new_m, (unsigned)t->new_x,
+            (unsigned long long)t->px_count_at_trip,
+            t->func_name);
+        for (int i = 0; i < t->stack_depth && pos < (int)sizeof(buf) - 256; i++) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "%s\"%s\"", i ? "," : "", t->stack[i]);
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]");
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "}");
+    send_line(buf);
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
 /* NLR diagnostic — non-rotating counters that survive cpu_trace ring
  * rotation. Answers "did any NLR-pattern block ever execute?" and
  * "did any Return ever consume a non-zero pending_skip?" — questions
@@ -5658,6 +5721,9 @@ static const CmdEntry s_commands[] = {
     {"mx_claim_check_arm", cmd_mx_claim_check_arm},
     {"mx_claim_check_disarm", cmd_mx_claim_check_disarm},
     {"mx_claim_check_get", cmd_mx_claim_check_get},
+    {"mx_async_check_arm", cmd_mx_async_check_arm},
+    {"mx_async_check_disarm", cmd_mx_async_check_disarm},
+    {"mx_async_check_get", cmd_mx_async_check_get},
     {"stack_drift_clear", cmd_stack_drift_clear},
     {"stack_drift_disarm", cmd_stack_drift_disarm},
     {"func_watch_arm", cmd_func_watch_arm},

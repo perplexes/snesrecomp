@@ -921,6 +921,54 @@ void cpu_trace_disarm_mx_claim_check(void);
  * mismatch was just recorded. The caller continues regardless; this is
  * observability only. */
 int cpu_trace_mx_claim_check(CpuState *cpu, uint32_t pc24, const char *name);
+
+/* ── Async cpu->m_flag / cpu->x_flag write tripwire ─────────────────────
+ *
+ * Every legitimate writer to cpu->m_flag / cpu->x_flag (SEP/REP/PHP/PLP
+ * emit, XCE emit, RTI emit) is paired with a cpu_trace_px_record() call.
+ * `g_px_mutation_count` is incremented unconditionally inside that
+ * record. The tripwire snapshots (m_flag, x_flag, g_px_mutation_count)
+ * at every cpu_trace_block hook; if the flags changed BUT the count
+ * didn't, an unexpected (async) writer mutated the flags between two
+ * checkpoints. Latches one-shot.
+ *
+ * Catches the DA49 class of bug documented in ISSUES.md
+ * (Session 2026-05-16): something — likely NMI/IRQ state restoration —
+ * sets cpu->x_flag = 1 mid-function without going through any emitted
+ * SEP/REP/PLP/RTI.
+ */
+typedef struct MxAsyncTrip {
+    uint8_t  armed;
+    uint8_t  triggered;
+    uint8_t  initialized;
+    uint8_t  pad;
+
+    /* Snapshot from the previous block hook. */
+    uint8_t  last_m;
+    uint8_t  last_x;
+    uint8_t  pad2[2];
+    uint64_t last_px_count;
+
+    /* Captured at trip. */
+    int32_t  frame;
+    uint32_t block_pc24;
+    uint8_t  prev_m, prev_x, new_m, new_x;
+    uint64_t px_count_at_trip;
+    char     func_name[MX_CLAIM_TRIP_FUNC_LEN];
+
+    /* Recomp stack snapshot at trip. */
+    int32_t  stack_depth;
+    char     stack[MX_CLAIM_TRIP_STACK_DEPTH][MX_CLAIM_TRIP_FUNC_LEN];
+} MxAsyncTrip;
+
+extern uint64_t g_px_mutation_count;
+extern MxAsyncTrip g_mx_async_trip;
+
+void cpu_trace_arm_mx_async_check(void);
+void cpu_trace_disarm_mx_async_check(void);
+/* Internal — called from cpu_trace_block when armed. Returns 1 if no
+ * trip just fired, 0 if the tripwire latched on this call. */
+int cpu_trace_mx_async_check(CpuState *cpu, uint32_t pc24);
 #else
 static inline void cpu_trace_arm_db_tripwire(uint8_t b) { (void)b; }
 static inline void cpu_trace_disarm_db_tripwire(void) { }
@@ -940,6 +988,11 @@ static inline void cpu_trace_arm_mx_claim_check(void) { }
 static inline void cpu_trace_disarm_mx_claim_check(void) { }
 static inline int cpu_trace_mx_claim_check(CpuState *c, uint32_t p, const char *n) {
     (void)c; (void)p; (void)n; return 1;
+}
+static inline void cpu_trace_arm_mx_async_check(void) { }
+static inline void cpu_trace_disarm_mx_async_check(void) { }
+static inline int cpu_trace_mx_async_check(CpuState *c, uint32_t p) {
+    (void)c; (void)p; return 1;
 }
 static inline uint64_t boundary_audit_init(void) { return 0; }
 static inline void boundary_audit_record_entry(const char *n) { (void)n; }
