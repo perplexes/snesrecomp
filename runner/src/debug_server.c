@@ -5150,6 +5150,43 @@ static void cmd_mx_async_check_disarm(const char *args) {
 #endif
 }
 
+/* offrails_get — JSON dump of every off-rails bucket. Each bucket is
+ * a unique (tag, high-16-of-hint) combination; entries accumulate
+ * hit_count + last_frame/last_hint without further stderr output.
+ *
+ * Example response:
+ *   {"count":2,"buckets":[
+ *     {"tag":"RomPtr-invalid","first_frame":4581,"last_frame":4612,
+ *      "first_hint":"0x00BB93AB","last_hint":"0x00BBA17F",
+ *      "hit_count":42,"stack_top":"Layer1SpecialScrolling08_..."}
+ *     ,{...}]}
+ */
+static void cmd_offrails_get(const char *args) {
+    (void)args;
+#if SNESRECOMP_TRACE
+    int n = cpu_trace_offrails_count();
+    static char buf[8192];
+    int pos = snprintf(buf, sizeof(buf), "{\"count\":%d,\"buckets\":[", n);
+    for (int i = 0; i < n && pos < (int)sizeof(buf) - 256; i++) {
+        const OffRailsBucket *b = cpu_trace_offrails_bucket(i);
+        if (!b) continue;
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"tag\":\"%s\",\"first_frame\":%d,\"last_frame\":%d,"
+            "\"first_hint\":\"0x%08X\",\"last_hint\":\"0x%08X\","
+            "\"hit_count\":%llu,\"stack_top\":\"%s\"}",
+            i ? "," : "",
+            b->tag, b->first_frame, b->last_frame,
+            b->first_hint, b->last_hint,
+            (unsigned long long)b->hit_count,
+            b->stack_top);
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+#else
+    send_fmt("{\"error\":\"SNESRECOMP_TRACE not enabled\"}");
+#endif
+}
+
 static void cmd_mx_async_check_get(const char *args) {
     (void)args;
 #if SNESRECOMP_TRACE
@@ -5724,6 +5761,7 @@ static const CmdEntry s_commands[] = {
     {"mx_async_check_arm", cmd_mx_async_check_arm},
     {"mx_async_check_disarm", cmd_mx_async_check_disarm},
     {"mx_async_check_get", cmd_mx_async_check_get},
+    {"offrails_get", cmd_offrails_get},
     {"stack_drift_clear", cmd_stack_drift_clear},
     {"stack_drift_disarm", cmd_stack_drift_disarm},
     {"func_watch_arm", cmd_func_watch_arm},

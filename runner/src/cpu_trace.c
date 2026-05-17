@@ -1869,17 +1869,31 @@ void cpu_trace_wram_write_check(CpuState *cpu, uint8_t bank, uint16_t addr,
     }
 }
 
-/* Off-rails dump: ONE dump per (tag, distinct hint) — silent for repeat
- * hits of the same kind. The first occurrence captures the chain;
- * additional repeats add nothing. Burning tokens on millions of
- * identical "RomPtr - Invalid 0x570000..0x57FFFF" lines is the
- * exact failure mode the ring buffer was built to avoid. */
-#define OFFRAILS_TAG_MAX 16
-static struct {
-    uint64_t hash;       /* fnv1a(tag) ^ (hint scrambled) */
-    uint64_t count;
-} s_offrails_seen[OFFRAILS_TAG_MAX];
+/* Off-rails detection: catch impossible CPU paths (RomPtr-invalid,
+ * cart-out-of-range, etc.) and record per-bucket context for later
+ * inspection via TCP. Buckets dedupe by (tag, high 16 bits of hint)
+ * so a sweep through e.g. $BB:0000-$BB:FFFF collapses to one bucket.
+ *
+ * 2026-05-16: stderr output reduced from 1024 DB/PB lines + 64
+ * trace lines per bucket (caused multi-second mid-gameplay stalls
+ * while stderr drained) to a single one-line summary. Full context
+ * (first/last hint, frame, recomp stack top) is captured per bucket
+ * and queryable via the `offrails_get` TCP command. */
+/* `struct OffRailsBucket` is declared in cpu_trace.h so the TCP layer
+ * can read its fields. The string-field sizes (24 and 64) MUST match
+ * the literal sizes in the header struct decl. */
+#define OFFRAILS_TAG_MAX  32
+#define OFFRAILS_TAG_LEN  24
+#define OFFRAILS_FUNC_LEN 64
+static OffRailsBucket s_offrails_seen[OFFRAILS_TAG_MAX];
 static int s_offrails_used = 0;
+
+/* Accessors for the TCP layer in debug_server.c. */
+int cpu_trace_offrails_count(void) { return s_offrails_used; }
+const OffRailsBucket *cpu_trace_offrails_bucket(int i) {
+    if (i < 0 || i >= s_offrails_used) return NULL;
+    return &s_offrails_seen[i];
+}
 
 /* ── NLR diagnostic counters (non-rotating) ────────────────────────── */
 NlrDiag g_nlr_diag = {0};
@@ -1949,28 +1963,46 @@ void cpu_trace_pending_skip_consume(CpuState *cpu, uint32_t pc24,
 }
 
 void cpu_trace_offrails(const char *tag, uint32_t hint) {
-    /* Cheap key — collision-tolerant, just needs to dedupe spam. */
-    uint64_t k = fnv1a(tag ? tag : "");
-    k = (k * 0x100000001B3ull) ^ (uint64_t)hint;
-    /* Group by (tag, high bytes of hint) so a sweep through
-     * \$57:0000-\$57:FFFF dedupes to one dump per page. */
+    /* Group by (tag, high 16 bits of hint) so a sweep through e.g.
+     * $BB:0000-$BB:FFFF dedupes to one bucket. */
     uint64_t group_k = fnv1a(tag ? tag : "");
     group_k = (group_k * 0x100000001B3ull) ^ ((uint64_t)hint & 0xFFFF0000u);
+    extern int snes_frame_counter;
     for (int i = 0; i < s_offrails_used; i++) {
         if (s_offrails_seen[i].hash == group_k) {
-            s_offrails_seen[i].count++;
+            s_offrails_seen[i].hit_count++;
+            s_offrails_seen[i].last_frame = snes_frame_counter;
+            s_offrails_seen[i].last_hint = hint;
             return;  /* silent dedup */
         }
     }
     if (s_offrails_used >= OFFRAILS_TAG_MAX) return;  /* table full, silent */
-    s_offrails_seen[s_offrails_used].hash = group_k;
-    s_offrails_seen[s_offrails_used].count = 1;
-    s_offrails_used++;
-    char buf[96];
-    snprintf(buf, sizeof(buf), "OFF-RAILS [%s] FIRST hint=$%08X",
-             tag ? tag : "?", hint);
-    cpu_trace_dump_dbpb(buf);
-    cpu_trace_dump_recent(buf, 64);
+    OffRailsBucket *b = &s_offrails_seen[s_offrails_used++];
+    memset(b, 0, sizeof(*b));
+    b->hash        = group_k;
+    b->hit_count   = 1;
+    b->first_frame = snes_frame_counter;
+    b->last_frame  = snes_frame_counter;
+    b->first_hint  = hint;
+    b->last_hint   = hint;
+    if (tag) {
+        strncpy(b->tag, tag, OFFRAILS_TAG_LEN - 1);
+        b->tag[OFFRAILS_TAG_LEN - 1] = 0;
+    }
+    if (g_recomp_stack_top > 0 && g_recomp_stack[g_recomp_stack_top - 1]) {
+        strncpy(b->stack_top, g_recomp_stack[g_recomp_stack_top - 1],
+                OFFRAILS_FUNC_LEN - 1);
+        b->stack_top[OFFRAILS_FUNC_LEN - 1] = 0;
+    }
+    /* ONE-LINE stderr summary. Full ring-buffer context queryable via
+     * the TCP `offrails_get` command — no multi-second stall from a
+     * 1088-line stderr flood at the moment of the hit. */
+    fprintf(stderr,
+            "[off-rails] [%s] hit=$%06X frame=%d stack_top=%s "
+            "(group=$%02X:_ — query offrails_get for context)\n",
+            tag ? tag : "?", hint & 0xFFFFFF, snes_frame_counter,
+            b->stack_top[0] ? b->stack_top : "<empty>",
+            (unsigned)((hint >> 16) & 0xFF));
 }
 
 /* Public wrapper so debug_server / other TUs can hash names. */

@@ -91,6 +91,28 @@ Catches: writes to specific WRAM addresses (manually armed). Used
 for narrowing "what writes $7E:XXXX with this value at this
 frame?" investigations.
 
+### Off-rails detector — `offrails_get`
+
+Catches: impossible CPU paths — `RomPtr` called with addresses
+outside valid ROM space (`< $8000` or `>= $7E0000`), cart reads
+out of range, and similar soft-fail probes from the framework.
+Each `(tag, high-16-bits-of-hint)` combination is a bucket; first
+hit per bucket emits a single-line stderr message and captures
+context (frame, hint, recomp stack top). Repeats accumulate
+silently into `hit_count` + `last_frame` / `last_hint`.
+
+Replaces the prior multi-thousand-line stderr dump (1024 DB/PB
+mutations + 64 trace events per first hit) that caused
+multi-second mid-gameplay stalls while stderr drained. The same
+data is preserved per-bucket and reachable via the TCP query.
+
+TCP:
+- `offrails_get` — JSON dump of every bucket (tag, first/last
+  frame, first/last hint, hit_count, stack_top).
+
+No arm/disarm — the detector is always live; the buckets are
+allocated as events fire.
+
 ## Tripwire framework — how to add a new one
 
 A new tripwire follows the same shape across all of them:

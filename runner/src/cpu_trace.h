@@ -434,9 +434,29 @@ RecompReturn cpu_trace_unresolved_stub_trap(
     CpuState *cpu, uint32_t target_pc24, const char *func_name);
 
 /* Called by RomPtr-invalid + cart_readLorom-out-of-range + any other
- * "off-the-rails" softfail to dump the trace ONCE per N events. Avoids
- * burying the trace under repeats of the same fail. */
+ * "off-the-rails" softfail. Deduplicates by (tag, high-16-of-hint)
+ * bucket; emits a single-line stderr summary on first-hit per bucket.
+ * Per-bucket state (frame, first/last hint, recomp stack top, hit
+ * count) is captured for retrieval via `offrails_get` TCP command. */
 void cpu_trace_offrails(const char *tag, uint32_t hint);
+
+/* Per-bucket capture for off-rails events. The TCP layer reads these
+ * fields directly; the string-field sizes (24, 64) must match the
+ * private OFFRAILS_TAG_LEN / OFFRAILS_FUNC_LEN macros in cpu_trace.c. */
+typedef struct OffRailsBucket {
+    uint64_t hash;
+    uint64_t hit_count;
+    int32_t  first_frame;
+    int32_t  last_frame;
+    uint32_t first_hint;
+    uint32_t last_hint;
+    char     tag[24];
+    char     stack_top[64];
+} OffRailsBucket;
+
+int cpu_trace_offrails_count(void);
+const OffRailsBucket *cpu_trace_offrails_bucket(int i);
+
 void cpu_trace_clear(void);
 
 /* ── Scoped one-shot tripwire (TCP-readable) ──────────────────────────────
