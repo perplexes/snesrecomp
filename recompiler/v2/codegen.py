@@ -984,12 +984,28 @@ def _emit_indirect_dispatch(insn) -> List[str]:
     suffix = _variant_suffix(em, ex)
 
     lines = ["{ /* indirect dispatch — cfg-resolved target list */"]
-    # Index source: low byte (x=1 / m=1) of X or Y, conservatively
-    # masked to 8 bits since dispatch tables are at most 256 entries
-    # anyway and most are far smaller.
+    # Index source: X or Y register. For JMP/JSR (abs,X)-style dispatch
+    # (table_bases empty — the dispatch consumes the operand directly as
+    # `(table, X)`), the asm shifts the entry index up by the entry size
+    # BEFORE the TAX: 16-bit pointer table = `ASL A; TAX` → X is a byte
+    # offset into the table; 24-bit pointer table = `ASL; ASL; ADC; TAX`
+    # → X is a 3-byte offset. The switch needs the LOGICAL entry index,
+    # so divide the register by the entry size before switching. The DP-
+    # built-pointer form (table_bases non-empty: parallel byte tables
+    # indexed directly) doesn't need the divide — the asm uses the index
+    # register as-is to load one byte per parallel table.
     idx_field = 'X' if idx_reg == 'X' else 'Y'
+    kind = getattr(insn, 'dispatch_kind', 'short')
+    table_bases = ()
+    # _emit_indirect_dispatch is only called for (abs,X)-style dispatchers
+    # (table_bases empty). The DP-built form routes through a different
+    # path that bakes the index into the parallel-table reads.
+    entry_size = 3 if kind == 'long' else 2
     lines.append(
-        f"  uint16 _idx = (uint16)(cpu->{idx_field} & 0xFFFF);")
+        f"  uint16 _idx = (uint16)((cpu->{idx_field} & 0xFFFF) / {entry_size});"
+        f"  /* entry_size={entry_size} ({kind}); ASL[*N] + TAX in asm => "
+        f"{idx_field} is byte offset, divide back to logical index */"
+    )
     lines.append(f"  static const uint16 _disp_n = {n};")
     lines.append("  if (_idx >= _disp_n) {")
     lines.append(

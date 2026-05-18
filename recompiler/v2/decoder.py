@@ -1311,6 +1311,25 @@ def decode_function(rom: bytes, bank: int, start: int,
             # directive matches, recover targets through the same helper
             # the JMP path uses — keeps semantics symmetric.
             ud_auth = (indirect_dispatch or {}).get(site_pc24)
+            # 2026-05-18 class fix: auto-recover same-bank JSR (abs,X)
+            # dispatch tables when cfg has no authorisation. Mirrors the
+            # JMP (abs,X) auto-recovery flow above — walks the table at
+            # the operand until the first invalid entry, applies the
+            # same structural gating (in-bank PC range, data_region
+            # check, padding check, null-pair stop). Closes the
+            # `Call indirect SUPPRESSED` stub class without per-site
+            # cfg `indirect_dispatch` declarations. cfg still wins when
+            # present (explicit beats heuristic).
+            if ud_auth is None:
+                entries = _autorecover_indirect_xtable(rom, bank, insn,
+                                                       data_regions)
+                if entries:
+                    ud_auth = {
+                        'count': len(entries),
+                        'idx_reg': 'X',
+                        'table_bases': (),
+                        '_autorecovered': True,
+                    }
             if ud_auth is not None:
                 entries = _resolve_indirect_dispatch_targets(
                     rom, bank, insn, ud_auth)
