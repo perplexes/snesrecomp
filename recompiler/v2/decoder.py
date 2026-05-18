@@ -1260,6 +1260,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                                                     or len(auth.get('table_bases', ())) == 3)
                                           else 'short')
                     insn.dispatch_idx_reg = auth['idx_reg']
+                    insn.dispatch_table_bases = tuple(auth.get('table_bases', ()) or ())
                     # Register each in-bank target as a decode successor
                     # so reach-analysis + auto-promote pick up the handlers.
                     extra_succs = []
@@ -1340,6 +1341,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                     insn.dispatch_entries = entries
                     insn.dispatch_kind = kind
                     insn.dispatch_idx_reg = ud_auth['idx_reg']
+                    insn.dispatch_table_bases = tuple(ud_auth.get('table_bases', ()) or ())
                     labeled_succ = _labeled_successors(insn, key, bank,
                                                callee_exit_mx=callee_exit_mx)
                     for e in entries:

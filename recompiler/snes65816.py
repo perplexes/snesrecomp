@@ -47,7 +47,7 @@ MODE_STR = {
 class Insn:
     __slots__ = ('addr', 'opcode', 'mnem', 'mode', 'operand', 'length',
                  'dispatch_entries', 'dispatch_kind', 'dispatch_idx_reg',
-                 'm_flag', 'x_flag', 'dispatch_terminal',
+                 'dispatch_table_bases', 'm_flag', 'x_flag', 'dispatch_terminal',
                  'const_z_fold_unconditional', 'const_z_fold_dead_pc24')
 
     def __init__(self, addr, opcode, mnem, mode, operand, length):
@@ -63,6 +63,10 @@ class Insn:
         # ('X' or 'Y') here so codegen emits a switch on the right
         # source. None for legacy dispatch-helper sites which use A.
         self.dispatch_idx_reg = None
+        # Non-empty for cfg/auto resolved indirect dispatches whose targets
+        # came from static table base(s). len >= 2 means parallel byte tables,
+        # where the index register is already a logical entry index.
+        self.dispatch_table_bases = ()
         self.dispatch_terminal = False
         self.m_flag = 1
         self.x_flag = 1

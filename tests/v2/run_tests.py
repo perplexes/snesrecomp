@@ -37,6 +37,7 @@ TEST_MODULES = [
     'test_v2_emit_lint',
     'test_nlr_idiom',
     'test_dispatcher_phk_per_jml',
+    'test_indirect_dispatch_parallel_tables',
     'test_wrapper_autoroute',
     'test_tail_call_autoroute',
     'test_emit_function_tail_call_past_end',

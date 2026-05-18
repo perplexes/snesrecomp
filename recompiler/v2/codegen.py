@@ -996,16 +996,19 @@ def _emit_indirect_dispatch(insn) -> List[str]:
     # register as-is to load one byte per parallel table.
     idx_field = 'X' if idx_reg == 'X' else 'Y'
     kind = getattr(insn, 'dispatch_kind', 'short')
-    table_bases = ()
-    # _emit_indirect_dispatch is only called for (abs,X)-style dispatchers
-    # (table_bases empty). The DP-built form routes through a different
-    # path that bakes the index into the parallel-table reads.
     entry_size = 3 if kind == 'long' else 2
-    lines.append(
-        f"  uint16 _idx = (uint16)((cpu->{idx_field} & 0xFFFF) / {entry_size});"
-        f"  /* entry_size={entry_size} ({kind}); ASL[*N] + TAX in asm => "
-        f"{idx_field} is byte offset, divide back to logical index */"
-    )
+    table_bases = tuple(getattr(insn, 'dispatch_table_bases', ()) or ())
+    if len(table_bases) >= 2:
+        lines.append(
+            f"  uint16 _idx = (uint16)(cpu->{idx_field} & 0xFFFF);"
+            "  /* parallel byte tables: register already holds logical index */"
+        )
+    else:
+        lines.append(
+            f"  uint16 _idx = (uint16)((cpu->{idx_field} & 0xFFFF) / {entry_size});"
+            f"  /* entry_size={entry_size} ({kind}); ASL[*N] + TAX in asm => "
+            f"{idx_field} is byte offset, divide back to logical index */"
+        )
     lines.append(f"  static const uint16 _disp_n = {n};")
     lines.append("  if (_idx >= _disp_n) {")
     lines.append(
