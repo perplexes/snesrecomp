@@ -1,33 +1,34 @@
+<p align="center">
+  <img src="docs/assets/snesrecomp-logo.png" alt="SNES Recomp" width="640">
+</p>
+
 # snesrecomp
 
 A static recompiler for SNES (Super Famicom) games. Translates 65816
 machine code into native C ahead-of-time, so the recompiled game runs
 as a normal binary rather than under interpretation.
 
-> ## ⚠️ Heavily Work-In-Progress
+> ## Status: alpha, one game playable end-to-end
 >
-> This project is **early, unstable, and not yet usable as a general
-> tool**. Internal debugging notes and design docs reference
-> incomplete passes, half-built infrastructure, and known
-> regressions. Branches are noisy. APIs change without warning.
-> Tests are not green on every branch. Expect things to be broken.
->
-> Treat anything you see here as a snapshot of in-progress work, not
-> a release.
+> **Super Mario World is believed fully playable** through the
+> recompiler as of 2026-05-20. The framework itself is still
+> pre-release: APIs change without warning, internal docs assume
+> active-session context, and adding a second game is in progress
+> rather than a solved problem. Treat what you see here as a working
+> snapshot, not a release.
 
 ## Status
 
-snesrecomp's primary driving test case is:
+Primary driving test case:
 
 - **Super Mario World** — recompiled via the companion repo
   [mstan/SuperMarioWorldRecomp](https://github.com/mstan/SuperMarioWorldRecomp).
-  **Believed fully playable** as of 2026-05-16: hand-verified
-  end-to-end through Worlds 1–2 (Yoshi's Island + Donut Plains,
-  including the Iggy castle boss) and into World 3 (Vanilla Dome).
-  Two always-on runtime tripwires (M/X claim verifier and async
-  cpu->m_flag/x_flag-write detector) have not latched on the
-  verified worlds. Worlds 4–7 + special content are not yet
-  hand-verified but expected to play similarly.
+  **Believed playable end-to-end.** Hand-verified through Worlds 1–2
+  (Yoshi's Island + Donut Plains, including the Iggy castle boss) and
+  into World 3 (Vanilla Dome); Worlds 4–7 + special content not yet
+  hand-verified but expected to play similarly. Two always-on runtime
+  tripwires (M/X claim verifier and async cpu->m_flag/x_flag-write
+  detector) have not latched on the verified worlds.
 
 The intent is for snesrecomp to be **game-agnostic** — adding a
 second game (Zelda: A Link to the Past, Mega Man X, Super Metroid,
@@ -36,9 +37,8 @@ patching. SMW exercised the framework hard during 2026-04/05 and
 surfaced the bug classes the framework now handles permanently:
 per-variant exit-(M, X) inference with order-independent fixpoint,
 dispatch-terminator JSL recognition, PHP/PLP-bracketed M/X tracking,
-wrapper-bypass autorouter, tail-call autorouter, and a full
-runtime tripwire suite catalogued in
-[`docs/TRIPWIRES.md`](docs/TRIPWIRES.md).
+wrapper-bypass autorouter, tail-call autorouter, and a full runtime
+tripwire suite catalogued in [`docs/TRIPWIRES.md`](docs/TRIPWIRES.md).
 
 Game #2 work in progress: separate sibling repos for ALttP and
 Mega Man X, each junctioning this snesrecomp checkout, are being
@@ -57,11 +57,11 @@ scaffolded.
   through the recompiler vs. an embedded snes9x.
 - `tools/` — scripts for regen, oracle diffing, etc.
 
-## Status of public API / docs
+## Public API / docs
 
-There isn't a public API. There aren't user-facing docs. Internal
-docs assume context from active development sessions and will not
-make sense without it. This will change once the framework
+There isn't a public API yet, and there aren't user-facing docs.
+Internal docs assume context from active development sessions and
+will not make sense without it. This will change once the framework
 stabilizes.
 
 ## License
