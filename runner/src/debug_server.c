@@ -615,7 +615,11 @@ static struct {
         char func[48];
         char parent[48];  // caller of `func` (one level up the recomp stack)
     } log[WRAM_TRACE_LOG_SIZE];
-} s_wram_trace = {0};
+} s_wram_trace = {
+    .active = 1,
+    .nranges = 1,
+    .ranges = { { 0x000e0, 0x000e9 } },  // BG1/BG2 scroll quad — always-on per ring-buffer-is-principal-observability rule
+};
 
 // ---- Tier-4 reads: WRAM read trace ----
 //
@@ -875,10 +879,28 @@ static inline void rdb_record(uint32_t adr, uint16_t old_val, uint16_t new_val, 
 static void rdb_check_watch(uint32_t addr, uint16_t val, uint8_t width);
 
 void debug_on_wram_write_byte(uint32_t addr, uint8_t old_val, uint8_t val) {
+    if (((addr >= 0xE0 && addr <= 0xE9) || addr == 0x11 || addr == 0x6C ||
+         (addr >= 0x11A && addr <= 0x124) || (addr >= 0x420 && addr <= 0x428)) && old_val != val) {
+        extern int snes_frame_counter;
+        extern const char *g_last_recomp_func;
+        fprintf(stderr, "[indir8] f=%d adr=%05x %02x->%02x func=%s\n",
+            snes_frame_counter, addr, old_val, val,
+            g_last_recomp_func ? g_last_recomp_func : "?");
+        fflush(stderr);
+    }
     rdb_record(addr, old_val, val, 1);
     rdb_check_watch(addr, val, 1);
 }
 void debug_on_wram_write_word(uint32_t addr, uint16_t old_val, uint16_t val) {
+    if (((addr >= 0xE0 && addr <= 0xE9) || addr == 0x11 || addr == 0x6C ||
+         (addr >= 0x11A && addr <= 0x124) || (addr >= 0x420 && addr <= 0x428)) && old_val != val) {
+        extern int snes_frame_counter;
+        extern const char *g_last_recomp_func;
+        fprintf(stderr, "[indir16] f=%d adr=%05x %04x->%04x func=%s\n",
+            snes_frame_counter, addr, old_val, val,
+            g_last_recomp_func ? g_last_recomp_func : "?");
+        fflush(stderr);
+    }
     rdb_record(addr, old_val, val, 2);
     rdb_check_watch(addr, val, 2);
 }
@@ -888,7 +910,7 @@ void debug_on_wram_write_word(uint32_t addr, uint16_t old_val, uint16_t val) {
 // has been turned on. Each entry records (frame, depth, func, parent)
 // at the moment of the push. Used to reconstruct the actual call
 // sequence within a frame for divergence analysis against SMWDisX.
-#define CALL_TRACE_LOG_SIZE 65536
+#define CALL_TRACE_LOG_SIZE 1048576
 extern const char *g_recomp_stack[];
 extern int g_recomp_stack_top;
 static struct {
@@ -901,7 +923,7 @@ static struct {
         char func[48];
         char parent[48];
     } log[CALL_TRACE_LOG_SIZE];
-} s_call_trace = {0};
+} s_call_trace = { .active = 1 };
 
 // ---- Tier-2 block-level execution trace ----
 // Emitted at every basic-block boundary (function entry + every label) by
@@ -1682,8 +1704,13 @@ static void cmd_unwatch(const char *args) {
 }
 
 static void cmd_pause(const char *args) {
-    s_paused = 1;
-    send_fmt("{\"ok\":true,\"paused\":true,\"frame\":%d}", snes_frame_counter);
+    // No-op by design. Pausing the simulation to "freeze the ring for query"
+    // is the same anti-pattern as arm-then-capture: it synchronizes the
+    // observer with the system instead of querying the always-on ring for
+    // the window of interest. Rings are sized to cover realistic query
+    // latency; if they aren't large enough, enlarge the ring, do not pause.
+    (void)args;
+    send_fmt("{\"ok\":false,\"error\":\"pause is disabled by policy; query the always-on rings for the window of interest. If the ring is too small, enlarge it.\",\"frame\":%d}", snes_frame_counter);
 }
 
 static void cmd_continue(const char *args) {

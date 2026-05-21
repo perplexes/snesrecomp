@@ -267,22 +267,34 @@ def emit_function(rom: bytes, bank: int, start: int,
              f'terminator={type(terminator).__name__ if terminator else "fall-through"}')
         if pull_count < 2:
             return None
-        # Setup region (before PLAs) must not contain Push/Pull/Call/
-        # IndirectGoto — those would interfere with stack accounting.
-        # Goto/CondBranch in the middle would mean the block isn't
-        # straight-line, which isn't possible at this stage of v2
-        # (each basic block has exactly one terminator), but check
-        # defensively.
+        # Setup region (before PLAs) must not contain Call/IndirectGoto —
+        # those would interfere with stack accounting. Goto/CondBranch in
+        # the middle would mean the block isn't straight-line, which isn't
+        # possible at this stage of v2 (each basic block has exactly one
+        # terminator), but check defensively.
+        #
+        # Push/Pull ops in the setup region are TOLERATED if they balance
+        # against function-wide PHA/PLA accounting — see check below. This
+        # handles the F971 idiom where a function does:
+        #   PHA / PHA / ... / PLA STA / PLA STA / PLA PLA RTS
+        # The first two PLAs are paired with the two PHAs (intra-function
+        # balance); the trailing PLA PLA is the NLR skip. The old per-block
+        # "no push/pull in setup" check rejected this pattern, causing the
+        # recomp to emit literal pops that consumed caller-frame bytes.
+        # 2026-05-21 fix for Zelda camera axis-swap bug (see ISSUES.md).
+        setup_pushes = 0
+        setup_pulls = 0
         for op in ops[:pla_start]:
-            if isinstance(op, (PushReg, PullReg, Push, Pull)):
-                _dbg(f'REJECT: setup region has {type(op).__name__}')
-                return None
             if isinstance(op, (Call, IndirectGoto)):
                 _dbg(f'REJECT: setup region has {type(op).__name__}')
                 return None
             if isinstance(op, (Goto, Return, CondBranch)):
                 _dbg(f'REJECT: setup region has {type(op).__name__}')
                 return None
+            if isinstance(op, (PushReg, Push)):
+                setup_pushes += 1
+            elif isinstance(op, (PullReg, Pull)):
+                setup_pulls += 1
         # Determine return-PC byte count: 2 for RTS, 3 for RTL.
         long_return = None
         if isinstance(terminator, Return):
@@ -333,6 +345,29 @@ def emit_function(rom: bytes, bank: int, start: int,
         if skip < 1 or skip > 3:
             _dbg(f'REJECT: skip={skip} out of [1,3]')
             return None
+        # Function-wide PHA/PLA balance check (2026-05-21):
+        # If the setup region of this block (or any other block, through
+        # the trailing-PLA chase) contains PLAs that aren't paired with
+        # PHAs in the same block, those PLAs MUST be paired with PHAs
+        # elsewhere in the function. Otherwise the function's net stack
+        # delta would consume MORE than just the NLR-skip bytes — the
+        # `pull_count` we computed would not be the true "extra pops".
+        #
+        # Accept iff (function-wide PLAs) - (function-wide PHAs) == pull_count
+        # (the only imbalance is the trailing NLR-skip pulls).
+        if setup_pushes > 0 or setup_pulls > 0:
+            fn_pushes = 0
+            fn_pulls = 0
+            for blk_ops in block_ir.values():
+                for op in blk_ops:
+                    if isinstance(op, (PushReg, Push)):
+                        fn_pushes += 1
+                    elif isinstance(op, (PullReg, Pull)):
+                        fn_pulls += 1
+            if fn_pulls - fn_pushes != pull_count:
+                _dbg(f'REJECT: function-wide imbalance fn_pulls={fn_pulls} '
+                     f'fn_pushes={fn_pushes} pull_count={pull_count}')
+                return None
         _dbg(f'ACCEPT: skip={skip} pla_start={pla_start} pla_count={pull_count}')
         return {
             'skip': skip,

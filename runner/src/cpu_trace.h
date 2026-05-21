@@ -203,7 +203,7 @@ void cpu_trace_set_s_range_watch(uint16_t s_lo, uint16_t s_hi, int enabled);
  * The bank field is matched modulo SNES WRAM mirroring: a watch at
  * ($7E, $008c) also fires for writes to ($00, $008c) etc. — they hit the
  * same g_ram offset. */
-#define CPU_WRAM_WATCH_MAX 32
+#define CPU_WRAM_WATCH_MAX 128
 
 typedef struct WramWatch {
     uint8_t  enabled;
@@ -1213,7 +1213,7 @@ static inline void cpu_trace_gm14_maybe_record(const char *n, uint8_t k) {
  */
 #define BLOCK_WATCH_MAX           16
 #define BLOCK_WATCH_ADDRS_MAX     8
-#define BLOCK_WATCH_HITS_MAX      32
+#define BLOCK_WATCH_HITS_MAX      256
 #define BLOCK_WATCH_STACK_DEPTH   8
 #define BLOCK_WATCH_FUNC_LEN      40
 
