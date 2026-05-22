@@ -135,9 +135,36 @@ def _variant_suffix(m: int, x: int) -> str:
 
 
 def set_name_resolver(name_map: Dict[int, str]) -> None:
-    """Replace the call-target name resolver. Pass an empty dict to clear."""
+    """Replace the call-target name resolver. Pass an empty dict to clear.
+
+    Installs LoROM bank-mirror aliases automatically: for any entry whose
+    bank is in $00-$3F or $80-$BF, the same name is registered for the
+    mirrored bank (XOR 0x80). LoROM maps banks $00-$3F as the SAME
+    physical bytes as $80-$BF; long-mode vector stubs (the canonical
+    pattern in Mega Man X and similar) JML into the $80-$BF aliases of
+    code that the cfg-author declared in $00-$3F. Without this aliasing,
+    the recompiler treats $80:8007 as a distinct unresolved cross-ROM-bank
+    Call target and emits a trap stub. With this aliasing, the JML
+    resolves to the cfg-declared function name automatically. (2026-05-21)
+
+    LoROM-only mapping. HiROM games (which use a different bank-mirror
+    layout) would need a separate map; we don't ship a HiROM game yet,
+    so the always-on LoROM alias is the conservative pre-policy. If a
+    HiROM game arrives, gate this behind a ROM-mapping-aware flag set
+    by v2_regen from the ROM internal header.
+    """
     global _NAME_RESOLVER
-    _NAME_RESOLVER = dict(name_map)
+    expanded: Dict[int, str] = {}
+    for pc24, name in name_map.items():
+        expanded[pc24] = name
+        bank = (pc24 >> 16) & 0xFF
+        if bank < 0x40 or 0x80 <= bank < 0xC0:
+            mirror_bank = bank ^ 0x80
+            mirror_pc24 = (mirror_bank << 16) | (pc24 & 0xFFFF)
+            # Don't overwrite explicit entries for the mirror bank.
+            if mirror_pc24 not in name_map:
+                expanded[mirror_pc24] = name
+    _NAME_RESOLVER = expanded
 
 
 def take_unresolved_call_targets() -> set:
