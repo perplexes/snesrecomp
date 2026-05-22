@@ -411,6 +411,12 @@ static uint64_t vram_trace_alloc_rings(void) {
  * around frame 94, before TCP attach can manually arm. */
 void debug_server_arm_default_reg_trace(void) {
     s_reg_trace.nranges = 0;
+    /* PPU brightness + force-blank + screen-enable.
+     * 2026-05-22: added for the MMX first-pass-attract investigation —
+     * the screen stays black on first pass with $2100 == $00 (brightness 0),
+     * so the writer of the fade-in ramp needs to be observable from frame 0. */
+    s_reg_trace.ranges[s_reg_trace.nranges].lo = 0x2100;
+    s_reg_trace.ranges[s_reg_trace.nranges].hi = 0x2100; s_reg_trace.nranges++;
     /* PPU VRAM control + CGRAM control */
     s_reg_trace.ranges[s_reg_trace.nranges].lo = 0x2115;
     s_reg_trace.ranges[s_reg_trace.nranges].hi = 0x2119; s_reg_trace.nranges++;
