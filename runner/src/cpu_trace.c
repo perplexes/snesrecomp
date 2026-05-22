@@ -2103,13 +2103,19 @@ void cpu_trace_arm_default_watches(void) {
      * a loud abort. */
     cpu_trace_phantom_arm_unresolvable_goto_set();
     /* Auto-arm stack-drift tripwire — fires on FIRST function exit
-     * after frame >= 400 where exit_S != entry_S AND exit_kind ==
-     * NORMAL. Frame gate of 400 skips the boot prolog; the original
-     * koopa-shell freeze hit at frame 380 with the now-fixed NLR
-     * site, so 400 is just past the known-good window. The Yoshi-
-     * block freeze (downstream bug) likely surfaces here. */
-    cpu_trace_arm_stack_drift_tripwire(400);
-    fprintf(stderr, "[cpu_trace] stack-drift tripwire armed (frame >= 400)\n");
+     * after frame >= STACK_DRIFT_MIN where exit_S != entry_S AND
+     * exit_kind == NORMAL. The tripwire FREEZES the cpu_trace ring
+     * via the gate at capture():978, so the chosen frame_min must
+     * sit AFTER the windows currently being investigated.
+     *
+     * 2026-05-22: bumped 400 → 100000 because the MMX attract path
+     * has a known stack-drift -9 in NMI's $83D9 → $8458 PHB/PLB at
+     * frame ~402 (handoff priority #5) that froze the ring before
+     * the slot-0 handler-corruption window (frame ~2400-8800) became
+     * queryable. Re-arm via the `stack_drift_clear <frame_min>` TCP
+     * command if a tighter window is wanted during a specific hunt. */
+    cpu_trace_arm_stack_drift_tripwire(100000);
+    fprintf(stderr, "[cpu_trace] stack-drift tripwire armed (frame >= 100000)\n");
     /* Auto-arm static M/X claim verifier — catches decoder-soundness
      * gaps at function entry, BEFORE stack drift cascades into visible
      * symptoms. Trips on first variant-suffix mismatch. See
