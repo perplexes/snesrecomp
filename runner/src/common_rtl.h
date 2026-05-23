@@ -30,6 +30,7 @@ extern int g_sram_size;
 extern const uint8 *g_rom;
 extern Ppu *g_ppu;
 extern Dma *g_dma;
+extern uint8 g_snesrecomp_last_hdmaen;
 
 // Main-CPU cycle estimate for APU pacing. Incremented per RDB_BLOCK_HOOK.
 // See common_rtl.c rtl_accumulate_apu_catchup() for usage.

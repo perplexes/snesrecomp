@@ -18,6 +18,7 @@ int g_sram_size;
 const uint8 *g_rom;
 Ppu *g_ppu;
 Dma *g_dma;
+uint8 g_snesrecomp_last_hdmaen;
 
 // Main-CPU cycle estimate, incremented per RDB_BLOCK_HOOK in debug_on_block_enter.
 // Used to pace APU catchup realistically: real SNES is ~3.58 MHz main / ~1.024 MHz APU,
@@ -212,6 +213,8 @@ void WriteReg(uint16 reg, uint8 value) {
   } else if (reg >= 0x2180 && reg < 0x2184) {
     snes_writeBBus(g_snes, reg & 0xff, value);
   } else if (reg >= 0x4200 && reg < 0x4220) {
+    if (reg == 0x420C)
+      g_snesrecomp_last_hdmaen = value;
     recomp_write_internal_reg(reg, value);
   } else if (reg >= 0x4300 && reg < 0x4380) {
     dma_write(g_dma, reg, value);

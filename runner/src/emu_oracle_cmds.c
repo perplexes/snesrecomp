@@ -517,6 +517,73 @@ static void h_emu_history(const char *args) {
         snes9x_bridge_history_newest_frame());
 }
 
+static void h_emu_wram_timeseries(const char *args) {
+    if (!g_active_backend || strcmp(g_active_backend->name, "snes9x") != 0) {
+        debug_server_send_fmt("{\"ok\":false,\"error\":\"requires snes9x backend\"}");
+        return;
+    }
+    unsigned int addr = 0, len = 1;
+    int from_frame = INT_MIN;
+    int to_frame = INT_MIN;
+    int limit = 512;
+    if (!args || sscanf(args, "%x %u %d %d %d",
+                        &addr, &len, &from_frame, &to_frame, &limit) < 1) {
+        debug_server_send_fmt("{\"ok\":false,\"error\":\"usage: emu_wram_timeseries <hex_addr> [len] [from_frame] [to_frame] [limit]\"}");
+        return;
+    }
+    if (len < 1) len = 1;
+    if (len > 32) len = 32;
+    if (addr + len > 0x2000) {
+        debug_server_send_fmt("{\"ok\":false,\"error\":\"range out of oracle history slice\"}");
+        return;
+    }
+    if (limit < 1) limit = 1;
+    if (limit > 4096) limit = 4096;
+
+    extern int snes9x_bridge_history_oldest_frame(void);
+    extern int snes9x_bridge_history_newest_frame(void);
+    extern int snes9x_bridge_history_copy_range(uint32_t, uint32_t,
+                                                uint32_t, uint8_t *);
+    int oldest = snes9x_bridge_history_oldest_frame();
+    int newest = snes9x_bridge_history_newest_frame();
+    if (from_frame == INT_MIN) from_frame = oldest;
+    if (to_frame == INT_MIN) to_frame = newest;
+
+    static char buf[1048576];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"addr\":\"0x%05x\",\"len\":%u,\"from\":%d,\"to\":%d,\"entries\":[",
+        addr, len, from_frame, to_frame);
+    uint8_t cur[32] = {0};
+    uint8_t last[32] = {0};
+    int have_last = 0;
+    int emitted = 0;
+    int considered = 0;
+    int truncated = 0;
+    for (int f = from_frame; f <= to_frame; f++) {
+        if (!snes9x_bridge_history_copy_range((uint32_t)f, addr, len, cur))
+            continue;
+        considered++;
+        if (have_last && memcmp(last, cur, len) == 0) continue;
+        if (emitted >= limit || pos > (int)sizeof(buf) - 256) {
+            truncated = 1;
+            break;
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "%s{\"f\":%d,\"hex\":\"",
+                        emitted ? "," : "", f);
+        for (unsigned int b = 0; b < len && pos < (int)sizeof(buf) - 16; b++)
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%02x", cur[b]);
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\"}");
+        memcpy(last, cur, len);
+        have_last = 1;
+        emitted++;
+    }
+    snprintf(buf + pos, sizeof(buf) - pos,
+             "],\"emitted\":%d,\"considered\":%d,\"truncated\":%s}",
+             emitted, considered, truncated ? "true" : "false");
+    debug_server_send_line(buf);
+}
+
 /* emu_wram_at_frame <frame> <addr>: returns the byte at the
  * given bank-7E WRAM offset at the given history frame. */
 static void h_emu_wram_at_frame(const char *args) {
@@ -965,6 +1032,25 @@ static void h_emu_wram_trace_reset(const char *args) {
     debug_server_send_fmt("{\"ok\":true}");
 }
 
+static void h_emu_screenshot(const char *args) {
+    if (!g_active_backend || strcmp(g_active_backend->name, "snes9x") != 0) {
+        debug_server_send_fmt("{\"ok\":false,\"error\":\"screenshot requires snes9x backend\"}");
+        return;
+    }
+    const char *path = (args && *args) ? args : "emu_screenshot.bmp";
+    extern int snes9x_bridge_screenshot(const char *);
+    if (!snes9x_bridge_screenshot(path)) {
+        debug_server_send_fmt(
+            "{\"ok\":false,\"error\":\"cannot open file\",\"path\":\"%s\"}",
+            path);
+        return;
+    }
+    extern uint32_t snes9x_bridge_get_frame(void);
+    debug_server_send_fmt(
+        "{\"ok\":true,\"path\":\"%s\",\"width\":256,\"height\":224,\"frame\":%d}",
+        path, (int)snes9x_bridge_get_frame());
+}
+
 static void h_emu_get_wram_trace(const char *args) {
     (void)args;
     if (!g_active_backend || strcmp(g_active_backend->name, "snes9x") != 0) {
@@ -1409,6 +1495,7 @@ int emu_oracle_handle_cmd(const char *cmd, const char *args) {
     if (strcmp(cmd, "emu_frame") == 0)     { h_emu_frame(args);     return 1; }
     if (strcmp(cmd, "emu_write_wram") == 0){ h_emu_write_wram(args); return 1; }
     if (strcmp(cmd, "emu_history") == 0)   { h_emu_history(args);   return 1; }
+    if (strcmp(cmd, "emu_wram_timeseries") == 0) { h_emu_wram_timeseries(args); return 1; }
     if (strcmp(cmd, "emu_wram_at_frame") == 0) { h_emu_wram_at_frame(args); return 1; }
     if (strcmp(cmd, "emu_dump_frame_wram") == 0) { h_emu_dump_frame_wram(args); return 1; }
     if (strcmp(cmd, "emu_sprite_timeseries") == 0) { h_emu_sprite_timeseries(args); return 1; }
@@ -1417,6 +1504,7 @@ int emu_oracle_handle_cmd(const char *cmd, const char *args) {
     if (strcmp(cmd, "emu_wram_delta") == 0){ h_emu_wram_delta(args); return 1; }
     if (strcmp(cmd, "emu_wram_trace_add") == 0)   { h_emu_wram_trace_add(args);   return 1; }
     if (strcmp(cmd, "emu_wram_trace_reset") == 0) { h_emu_wram_trace_reset(args); return 1; }
+    if (strcmp(cmd, "emu_screenshot") == 0)       { h_emu_screenshot(args);       return 1; }
     if (strcmp(cmd, "emu_get_wram_trace") == 0)   { h_emu_get_wram_trace(args);   return 1; }
     if (strcmp(cmd, "emu_wram_writes_at") == 0)   { h_emu_wram_writes_at(args);   return 1; }
     if (strcmp(cmd, "emu_insn_trace_on") == 0)    { h_emu_insn_trace_on(args);    return 1; }

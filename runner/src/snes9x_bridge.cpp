@@ -877,6 +877,53 @@ extern "C" int snes9x_bridge_history_count(void) {
     return s_emu_frame_hist_count;
 }
 
+extern "C" int snes9x_bridge_screenshot(const char *path) {
+    if (!path || !*path) path = "emu_screenshot.bmp";
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+
+    int w = (int)(s_frame_width > 256 ? 256 : s_frame_width);
+    int h = (int)(s_frame_height > 240 ? 240 : s_frame_height);
+    if (w <= 0) w = 256;
+    if (h <= 0) h = 224;
+
+    int row_bytes = w * 3;
+    int pad = (4 - (row_bytes % 4)) % 4;
+    int stride = row_bytes + pad;
+    int img_size = stride * h;
+    int file_size = 54 + img_size;
+
+    uint8_t hdr[54] = {0};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    hdr[2] = file_size; hdr[3] = file_size >> 8;
+    hdr[4] = file_size >> 16; hdr[5] = file_size >> 24;
+    hdr[10] = 54;
+    hdr[14] = 40;
+    hdr[18] = w; hdr[19] = w >> 8;
+    int neg_h = -h;
+    memcpy(&hdr[22], &neg_h, 4);
+    hdr[26] = 1;
+    hdr[28] = 24;
+    hdr[34] = img_size; hdr[35] = img_size >> 8;
+    hdr[36] = img_size >> 16; hdr[37] = img_size >> 24;
+    fwrite(hdr, 1, sizeof(hdr), f);
+
+    uint8_t row_buf[256 * 3 + 4];
+    memset(row_buf, 0, sizeof(row_buf));
+    for (int y = 0; y < h; y++) {
+        const uint8_t *src = (const uint8_t *)(s_framebuf_xrgb + y * 256);
+        for (int x = 0; x < w; x++) {
+            row_buf[x * 3 + 0] = src[x * 4 + 0];
+            row_buf[x * 3 + 1] = src[x * 4 + 1];
+            row_buf[x * 3 + 2] = src[x * 4 + 2];
+        }
+        fwrite(row_buf, 1, stride, f);
+    }
+
+    fclose(f);
+    return 1;
+}
+
 /* Write a byte to snes9x's WRAM at the given offset (0..$1FFFF).
  * Used by input-injection / state-injection probes that need to
  * synchronize Mario's position on both sides for collision-physics

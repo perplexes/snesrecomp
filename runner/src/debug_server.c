@@ -3548,6 +3548,72 @@ static void cmd_history_status(const char *args) {
              s_history_count, FRAME_HISTORY_SIZE, oldest, newest);
 }
 
+static void cmd_wram_timeseries(const char *args) {
+    unsigned int addr = 0, len = 1;
+    int from_frame = INT_MIN;
+    int to_frame = INT_MIN;
+    int limit = 512;
+    if (!args || sscanf(args, "%x %u %d %d %d",
+                        &addr, &len, &from_frame, &to_frame, &limit) < 1) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: wram_timeseries <hex_addr> [len] [from_frame] [to_frame] [limit]\"}");
+        return;
+    }
+    if (len < 1) len = 1;
+    if (len > 32) len = 32;
+    if (addr + len > 0x20000) {
+        send_fmt("{\"ok\":false,\"error\":\"range out of WRAM\"}");
+        return;
+    }
+    if (limit < 1) limit = 1;
+    if (limit > 4096) limit = 4096;
+
+    lock_mutex();
+    int oldest = s_history_count > 0
+        ? s_frame_history[(s_history_write_idx - s_history_count + FRAME_HISTORY_SIZE) % FRAME_HISTORY_SIZE].frame_number
+        : -1;
+    int newest = s_history_count > 0
+        ? s_frame_history[(s_history_write_idx - 1 + FRAME_HISTORY_SIZE) % FRAME_HISTORY_SIZE].frame_number
+        : -1;
+    if (from_frame == INT_MIN) from_frame = oldest;
+    if (to_frame == INT_MIN) to_frame = newest;
+
+    static char buf[1048576];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"addr\":\"0x%05x\",\"len\":%u,\"from\":%d,\"to\":%d,\"entries\":[",
+        addr, len, from_frame, to_frame);
+    uint8_t last[32] = {0};
+    int have_last = 0;
+    int emitted = 0;
+    int considered = 0;
+    int truncated = 0;
+    int start = (s_history_write_idx - s_history_count + FRAME_HISTORY_SIZE) % FRAME_HISTORY_SIZE;
+    for (int i = 0; i < s_history_count; i++) {
+        FrameRecord *r = &s_frame_history[(start + i) % FRAME_HISTORY_SIZE];
+        if (r->frame_number < from_frame || r->frame_number > to_frame) continue;
+        considered++;
+        if (have_last && memcmp(last, r->wram + addr, len) == 0) continue;
+        if (emitted >= limit || pos > (int)sizeof(buf) - 256) {
+            truncated = 1;
+            break;
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "%s{\"f\":%d,\"hex\":\"",
+                        emitted ? "," : "", r->frame_number);
+        for (unsigned int b = 0; b < len && pos < (int)sizeof(buf) - 16; b++)
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%02x",
+                            r->wram[addr + b]);
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\"}");
+        memcpy(last, r->wram + addr, len);
+        have_last = 1;
+        emitted++;
+    }
+    unlock_mutex();
+    snprintf(buf + pos, sizeof(buf) - pos,
+             "],\"emitted\":%d,\"considered\":%d,\"truncated\":%s}",
+             emitted, considered, truncated ? "true" : "false");
+    send_line(buf);
+}
+
 static uint8_t sprite_field(const uint8_t *wram, int base, int slot) {
     return wram[base + slot];
 }
@@ -5887,6 +5953,7 @@ static const CmdEntry s_commands[] = {
     {"get_frame",     cmd_get_frame},
     {"frame_range",   cmd_frame_range},
     {"history",       cmd_history_status},
+    {"wram_timeseries", cmd_wram_timeseries},
     {"sprite_timeseries", cmd_sprite_timeseries},
     {"profile",       cmd_profile_query},
     {"profile_on",    cmd_profile_on},

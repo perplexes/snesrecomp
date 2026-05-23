@@ -754,10 +754,45 @@ def main() -> int:
 
         if added == 0:
             break
+        # Auto-promoted callees did not exist when the earlier exit-M/X
+        # autoroute ran. Refresh the auto-detected per-variant exit map
+        # before the next emit pass so callers decode post-JSR/JSL code
+        # with the newly-known return M/X state.
+        for _bank2, _cfg_path2, cfg2 in parsed:
+            cfg2.exit_mx_at_per_variant.clear()
+        refreshed_exit_mx_fixes = autoroute_exit_mx(
+            parsed, rom, dispatch_helpers=dispatch_helpers)
+        callee_exit_mx = {}
+        cfg_exit_mx_count = 0
+        declared_exit_mx = {}
+        for _bank2, _cfg_path2, cfg2 in parsed:
+            for (b_id, addr16, m_val, x_val) in cfg2.exit_mx_at:
+                declared_exit_mx[(b_id & 0xFF, addr16 & 0xFFFF)] = (
+                    m_val, x_val)
+        for (b_id, addr16), (ex_m, ex_xf) in declared_exit_mx.items():
+            target_pc24 = (b_id << 16) | addr16
+            mx_set = variants.get(target_pc24)
+            if mx_set:
+                for em, ex2 in mx_set:
+                    callee_exit_mx[(target_pc24, em, ex2)] = (
+                        ex_m, ex_xf)
+                    cfg_exit_mx_count += 1
+            else:
+                callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
+                cfg_exit_mx_count += 1
+        per_variant_count = 0
+        for _bank2, _cfg_path2, cfg2 in parsed:
+            for (b_id, addr16, em_in, ex_in, ex_m, ex_xf) in \
+                    cfg2.exit_mx_at_per_variant:
+                target_pc24 = ((b_id & 0xFF) << 16) | (addr16 & 0xFFFF)
+                callee_exit_mx[(target_pc24, em_in & 1, ex_in & 1)] = (
+                    ex_m & 1, ex_xf & 1)
+                per_variant_count += 1
         print(
             f"  auto-promote pass {pass_idx + 1}: "
             f"added {added} entries "
             f"(calls={len(unresolved_calls)}); "
+            f"refreshed {len(refreshed_exit_mx_fixes)} exit-mx routes; "
             f"re-emitting"
         )
         # Refresh the codegen name resolver with the newly-synthesized

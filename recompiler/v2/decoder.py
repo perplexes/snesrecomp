@@ -840,6 +840,12 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
                 # the same callee may have different exit (m, x).
                 key_lookup = (target_pc24, post_m, post_x)
                 hit = callee_exit_mx.get(key_lookup)
+                if hit is None:
+                    tbank = (target_pc24 >> 16) & 0xFF
+                    if tbank < 0x40 or 0x80 <= tbank < 0xC0:
+                        mirror_pc24 = target_pc24 ^ 0x800000
+                        hit = callee_exit_mx.get(
+                            (mirror_pc24, post_m, post_x))
                 if hit is not None:
                     em, ex = hit
                     if em is not None and ex is not None:
@@ -1292,6 +1298,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                     # Register each in-bank target as a decode successor
                     # so reach-analysis + auto-promote pick up the handlers.
                     extra_succs = []
+                    site_m = insn.m_flag & 1
+                    site_x = insn.x_flag & 1
                     for e in entries:
                         if e is None or e == 0:
                             continue
@@ -1299,7 +1307,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                         e16 = e & 0xFFFF
                         if eb == bank and 0x8000 <= e16 <= 0xFFFF:
                             extra_succs.append(
-                                (DecodeKey(addr24(eb, e16), key.m, key.x, ()),
+                                (DecodeKey(addr24(eb, e16), site_m, site_x, ()),
                                  'jump'))
                     # JMP/JML indirect is a TERMINATOR (no fall-through).
                     # All decoded successors come from the resolved table.
@@ -1420,6 +1428,8 @@ def decode_function(rom: bytes, bank: int, start: int,
                     insn.dispatch_table_bases = tuple(ud_auth.get('table_bases', ()) or ())
                     labeled_succ = _labeled_successors(insn, key, bank,
                                                callee_exit_mx=callee_exit_mx)
+                    site_m = insn.m_flag & 1
+                    site_x = insn.x_flag & 1
                     for e in entries:
                         if e is None or e == 0:
                             continue
@@ -1427,7 +1437,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                         e16 = e & 0xFFFF
                         if eb == bank and 0x8000 <= e16 <= 0xFFFF:
                             labeled_succ.append(
-                                (DecodeKey(addr24(eb, e16), key.m, key.x, ()),
+                                (DecodeKey(addr24(eb, e16), site_m, site_x, ()),
                                  'jump'))
                     succ = [k for (k, _) in labeled_succ]
                     graph.insns[key] = DecodedInsn(key=key, insn=insn,
@@ -1474,12 +1484,14 @@ def decode_function(rom: bytes, bank: int, start: int,
                 # Append jump-kind edges to the in-bank handlers. Each
                 # dispatch target enters as its own function — empty
                 # p_stack, not the caller's.
+                site_m = insn.m_flag & 1
+                site_x = insn.x_flag & 1
                 for e in entries:
                     e16 = e & 0xFFFF
                     eb = (e >> 16) & 0xFF if kind == 'long' else bank
                     if eb == bank and 0x8000 <= e16 <= 0xFFFF:
                         labeled_succ.append(
-                            (DecodeKey(addr24(eb, e16), key.m, key.x, ()), 'jump')
+                            (DecodeKey(addr24(eb, e16), site_m, site_x, ()), 'jump')
                         )
                 succ = [k for (k, _) in labeled_succ]
                 graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=succ)

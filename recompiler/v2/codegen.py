@@ -228,6 +228,7 @@ from v2.ir import (  # noqa: E402
     Transfer, XBA, Nop, Break, Stop, PushEffectiveAddress,
     Reg, SegRef, SegKind, Value,
 )
+from snes65816 import INDIR  # noqa: E402
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1012,21 +1013,25 @@ def _emit_indirect_dispatch(insn) -> List[str]:
     # JMP/JML → emit `return RECOMP_RETURN_NORMAL;` (terminal).
     is_jsr = getattr(insn, 'mnem', '') == 'JSR'
 
-    # Variant suffix for the dispatched handlers: we route to each
-    # handler at its DEFAULT cfg entry (m, x). The handler's own cfg
-    # entry knows what mode it expects; the recomp pipeline mints the
-    # corresponding _MxXy variant. For dispatchers where every entry
-    # is reached in (m=1, x=1) — the SNES asm default — _M1X1 is right.
-    # Per-target variant resolution beyond this needs another cfg
-    # directive (out of scope for this class fix).
-    em, ex = 1, 1
+    # Variant suffix for dispatched handlers follows the live width state
+    # at the dispatch site. The PHA/SEP/RTS idiom is the exception: it
+    # explicitly forces M/X to 8-bit before the synthetic RTS transfer.
+    is_rts_stack_dispatch = bool(getattr(insn, 'dispatch_terminal', False))
+    if is_rts_stack_dispatch:
+        em, ex = 1, 1
+    else:
+        em = getattr(insn, 'm_flag', 1) & 1
+        ex = getattr(insn, 'x_flag', 1) & 1
     suffix = _variant_suffix(em, ex)
 
     # Comment marker differentiates JSR (call, fall-through) from
     # JMP/JML (terminator, tail-call) for downstream tooling and
     # regression tests.
-    _comment = ("indirect dispatch call: cfg-resolved target list" if is_jsr
-                else "indirect dispatch terminator: cfg-resolved target list")
+    if is_rts_stack_dispatch:
+        _comment = "RTS-stack dispatch terminator: cfg-resolved target list"
+    else:
+        _comment = ("indirect dispatch call: cfg-resolved target list" if is_jsr
+                    else "indirect dispatch terminator: cfg-resolved target list")
     lines = [f"{{ /* {_comment} */"]
     # Index source: X or Y register. For JMP/JSR (abs,X)-style dispatch
     # (table_bases empty — the dispatch consumes the operand directly as
@@ -1042,6 +1047,48 @@ def _emit_indirect_dispatch(insn) -> List[str]:
     kind = getattr(insn, 'dispatch_kind', 'short')
     entry_size = 3 if kind == 'long' else 2
     table_bases = tuple(getattr(insn, 'dispatch_table_bases', ()) or ())
+    if getattr(insn, 'mode', None) == INDIR and len(table_bases) == 1:
+        ptr = insn.operand & 0xFFFF
+        lines.append(
+            f"  uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x{ptr:04x});"
+            "  /* absolute indirect dispatch: switch on the loaded pointer */"
+        )
+        if is_rts_stack_dispatch:
+            lines.append("  {")
+            for stmt in emitter_helpers.modify_p_via_mirrors(0x30, "sep"):
+                lines.append(f"    {stmt}")
+            lines.append("  }")
+        lines.append("  switch (_target) {")
+        for i, e in enumerate(entries):
+            if e is None or e == 0:
+                continue
+            target_bank = (e >> 16) & 0xFF
+            local_pc = e & 0xFFFF
+            tgt_addr = e & 0xFFFFFF
+            base_name = _NAME_RESOLVER.get(tgt_addr)
+            if base_name is None:
+                base_name = f"bank_{target_bank:02X}_{local_pc:04X}"
+            _UNRESOLVED_CALL_TARGETS.add((tgt_addr, em, ex))
+            name = f"{base_name}{suffix}"
+            env = emitter_helpers.call_with_pb_save(target_bank, name)
+            case_value = tgt_addr if kind == 'long' else local_pc
+            lines.append(f"    case 0x{case_value:04x}: {{")
+            for stmt in env:
+                lines.append(f"      {stmt}")
+            if is_jsr:
+                lines.append("      break;")
+            else:
+                lines.append("      return RECOMP_RETURN_NORMAL;")
+            lines.append("    }")
+        lines.append("    default: break;")
+        lines.append("  }")
+        if is_jsr:
+            lines.append("  /* fall through to post-JSR block */")
+        else:
+            lines.append(
+                f"  return cpu_trace_dispatch_oob(cpu, 0x{site_pc24:06x}, _target);")
+        lines.append("}")
+        return lines
     if len(table_bases) >= 2:
         lines.append(
             f"  uint16 _idx = (uint16)(cpu->{idx_field} & 0xFFFF);"
@@ -1053,6 +1100,11 @@ def _emit_indirect_dispatch(insn) -> List[str]:
             f"  /* entry_size={entry_size} ({kind}); ASL[*N] + TAX in asm => "
             f"{idx_field} is byte offset, divide back to logical index */"
         )
+    if is_rts_stack_dispatch:
+        lines.append("  {")
+        for stmt in emitter_helpers.modify_p_via_mirrors(0x30, "sep"):
+            lines.append(f"    {stmt}")
+        lines.append("  }")
     lines.append(f"  static const uint16 _disp_n = {n};")
     lines.append("  if (_idx >= _disp_n) {")
     if is_jsr:
