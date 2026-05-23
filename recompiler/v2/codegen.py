@@ -1059,19 +1059,28 @@ def _emit_indirect_dispatch(insn) -> List[str]:
                 lines.append(f"    {stmt}")
             lines.append("  }")
         lines.append("  switch (_target) {")
+        # Multiple table slots may resolve to the same target PC (e.g., a
+        # dispatch table with shared/default handlers). The switch keys
+        # on the loaded pointer, so emit one case per unique target PC —
+        # duplicate case labels are a hard C error (zelda_01 hit this on
+        # repeated 0x8A92 / 0x8B0D entries).
+        seen_cases = set()
         for i, e in enumerate(entries):
             if e is None or e == 0:
                 continue
             target_bank = (e >> 16) & 0xFF
             local_pc = e & 0xFFFF
             tgt_addr = e & 0xFFFFFF
+            case_value = tgt_addr if kind == 'long' else local_pc
+            if case_value in seen_cases:
+                continue
+            seen_cases.add(case_value)
             base_name = _NAME_RESOLVER.get(tgt_addr)
             if base_name is None:
                 base_name = f"bank_{target_bank:02X}_{local_pc:04X}"
             _UNRESOLVED_CALL_TARGETS.add((tgt_addr, em, ex))
             name = f"{base_name}{suffix}"
             env = emitter_helpers.call_with_pb_save(target_bank, name)
-            case_value = tgt_addr if kind == 'long' else local_pc
             lines.append(f"    case 0x{case_value:04x}: {{")
             for stmt in env:
                 lines.append(f"      {stmt}")
