@@ -1117,6 +1117,18 @@ def _emit_indirect_dispatch(insn) -> List[str]:
         _comment = ("indirect dispatch call: cfg-resolved target list" if is_jsr
                     else "indirect dispatch terminator: cfg-resolved target list")
     lines = [f"{{ /* {_comment} */"]
+    # Option-1 cpu->S ABI: a real JSR (abs,X) call pushes a 2-byte return
+    # frame and enters the handler with host_return_valid=1. A JMP/JML
+    # indirect dispatch is a tail transfer — no frame pushed; the handler
+    # inherits THIS function's host-return validity (_hrv). Set once here;
+    # all dispatch sub-forms below invoke the handler after this point.
+    if is_jsr:
+        _iret16 = (site_pc24 + 2) & 0xFFFF  # JSR (abs,X) is 3 bytes; push return-1
+        lines.append(f"  cpu_write8(cpu, 0x00, cpu->S, 0x{(_iret16 >> 8) & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);")
+        lines.append(f"  cpu_write8(cpu, 0x00, cpu->S, 0x{_iret16 & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);")
+        lines.append("  cpu->host_return_valid = 1;  /* indirect JSR call */")
+    else:
+        lines.append("  cpu->host_return_valid = _hrv;  /* JMP/JML indirect tail dispatch */")
     # Index source: X or Y register. For JMP/JSR (abs,X)-style dispatch
     # (table_bases empty — the dispatch consumes the operand directly as
     # `(table, X)`), the asm shifts the entry index up by the entry size
@@ -1380,6 +1392,12 @@ def _emit_dispatch(insn) -> List[str]:
     lines.append("    cpu_p_to_mirrors(cpu);")
     lines.append("    cpu_trace_px_record(cpu, 0, 1 /*SEP*/, _old_p, cpu->P);")
     lines.append("  }")
+    # Option-1 cpu->S ABI: the ExecutePtr trampoline's own return frame is
+    # discarded by the PLA*N IR ops preceding this dispatch (now emitted as
+    # normal cpu->S pops). The dispatched handler is a dispatch-trampoline
+    # target with no paired host-C caller -> enter with host_return_valid=0
+    # so its RTS/RTL re-dispatches on the popped PC rather than host-return.
+    lines.append("  cpu->host_return_valid = 0;  /* dispatch-trampoline target */")
     lines.append("  switch (_idx) {")
     for i, e in enumerate(entries):
         if e == 0:
