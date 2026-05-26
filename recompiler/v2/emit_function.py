@@ -382,6 +382,28 @@ def emit_function(rom: bytes, bank: int, start: int,
     # detector below.
     block_per_insn_ir: Dict[DecodeKey, List[Tuple[object, List[IROp]]]] = {}
     block_ir: Dict[DecodeKey, List[IROp]] = {}
+    def _tail_call_stmt(call_expr: str, comment: str,
+                        nlr_info_for_block: Optional[dict] = None) -> str:
+        if nlr_info_for_block is None or not nlr_info_for_block.get('cross_tail'):
+            return (
+                f"{{ RecompReturn _tc = {call_expr}; "
+                f"RecompStackPop(); return _tc; }}  {comment}"
+            )
+        skip = int(nlr_info_for_block['skip'])
+        return (
+            f"{{ RecompReturn _tc = {call_expr}; "
+            f"RecompReturn _nlr = _pending_skip; "
+            f"_pending_skip = RECOMP_RETURN_NORMAL; "
+            f"cpu_trace_pending_skip_consume(cpu, 0, (uint8)_nlr, g_last_recomp_func); "
+            f"if (_nlr == RECOMP_RETURN_NORMAL) _nlr = RECOMP_RETURN_SKIP_{skip}; "
+            f"if (_tc != RECOMP_RETURN_NORMAL) {{ "
+            f"int _combined = (int)_tc + (int)_nlr; "
+            f"_nlr = (RecompReturn)(_combined > (int)RECOMP_RETURN_SKIP_3 ? "
+            f"(int)RECOMP_RETURN_SKIP_3 : _combined); }} "
+            f"cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY); "
+            f"RecompStackPop(); return _nlr; }}  {comment}"
+        )
+
     for key in block_order:
         pairs: List[Tuple[object, List[IROp]]] = []
         flat: List[IROp] = []
@@ -489,6 +511,47 @@ def emit_function(rom: bytes, bank: int, start: int,
             # _pending_skip we set here).
             block = cfg.blocks[key]
             succs = block.successors
+            if isinstance(terminator, Goto) and len(succs) == 0:
+                # Cross-function tail jump after PLA*N. The common shape is:
+                #
+                #   ... setup ...
+                #   PLA
+                #   PLA
+                #   JML target
+                #
+                # The PLAs discard this function's caller return frame, then
+                # control transfers to another function. There is no local
+                # successor Return for the original detector to chase, but the
+                # effect is still a non-local return: after the tail target
+                # returns, the C caller corresponding to the popped frame must
+                # be skipped. Accept only explicit long JMP/JML terminators so
+                # malformed local CFG gaps do not get treated as NLRs.
+                last_insn = block.insns[-1].insn if block.insns else None
+                if (getattr(last_insn, 'mnem', '') == 'JMP'
+                        and getattr(last_insn, 'length', 0) == 4):
+                    if pull_count % 2 == 0:
+                        long_return = False
+                    elif pull_count % 3 == 0:
+                        long_return = True
+                    else:
+                        _dbg(f'REJECT: cross-tail pull_count={pull_count} '
+                             'not divisible by 2 or 3')
+                        return None
+                    unit = 3 if long_return else 2
+                    skip = pull_count // unit
+                    if skip < 1 or skip > 3:
+                        _dbg(f'REJECT: cross-tail skip={skip} out of [1,3]')
+                        return None
+                    _dbg(f'ACCEPT: cross-tail skip={skip} '
+                         f'pla_start={pla_start} pla_count={pull_count}')
+                    return {
+                        'skip': skip,
+                        'pla_start_ir_idx': pla_start,
+                        'pla_count': pull_count,
+                        'cross_tail': True,
+                    }
+                _dbg('REJECT: no local successor and not explicit long JMP')
+                return None
             _dbg(f'no Return; successors={[_label_for(s) for s in succs]}')
             if len(succs) != 1:
                 _dbg(f'REJECT: succ_count={len(succs)} (not exactly 1)')
@@ -1090,15 +1153,14 @@ def emit_function(rom: bytes, bank: int, start: int,
                                         f"cpu->PB = 0x{tgt_bank:02X}; /* JML "
                                         f"into bank ${tgt_bank:02X} */"
                                     )
-                                    lines.append(
-                                        f"{{ RecompReturn _tc = "
-                                        f"{tgt_name}{sib_suffix}(cpu); "
-                                        f"RecompStackPop(); return _tc; }}"
-                                        f"  /* tail-call cross-bank into "
+                                    lines.append(_tail_call_stmt(
+                                        f"{tgt_name}{sib_suffix}(cpu)",
+                                        f"/* tail-call cross-bank into "
                                         f"{tgt_name}{sib_suffix} at "
                                         f"${target_pc24:06X} (JML "
-                                        f"unresolved successor) */"
-                                    )
+                                        f"unresolved successor) */",
+                                        nlr_info,
+                                    ))
                                     block_terminated = True
                                     break  # exit `for op in ir_ops`
                             # No name resolved yet — for a CROSS-BANK
@@ -1139,15 +1201,14 @@ def emit_function(rom: bytes, bank: int, start: int,
                                     f"cpu->PB = 0x{tgt_bank:02X}; /* JML "
                                     f"into bank ${tgt_bank:02X} */"
                                 )
-                                lines.append(
-                                    f"{{ RecompReturn _tc = "
-                                    f"{synth_name}{sib_suffix}(cpu); "
-                                    f"RecompStackPop(); return _tc; }}"
-                                    f"  /* tail-call cross-bank into "
+                                lines.append(_tail_call_stmt(
+                                    f"{synth_name}{sib_suffix}(cpu)",
+                                    f"/* tail-call cross-bank into "
                                     f"{synth_name}{sib_suffix} at "
                                     f"${target_pc24:06X} (auto-promoted "
-                                    f"via Call demand) */"
-                                )
+                                    f"via Call demand) */",
+                                    nlr_info,
+                                ))
                             else:
                                 lines.append(
                                     f"return cpu_trace_unresolved_goto_trap(cpu, "
