@@ -119,6 +119,56 @@ S, exits m=1) AND controller input + boot-to-Highway do not regress.
 
 ---
 
+## Option-1 attempt #2 — boot-wedge diagnosis (2026-05-26)
+
+Implemented the full host_return_valid ABI (commits on `feat/cpu-s-stack-model`).
+It **compiles clean and runs**, but **regresses boot**: the game wedges by
+~frame 456 (game mode 58), watchdog tripping every frame, call_stack pinned in
+the NMI DMA-queue walker `bank_00_82C8 ← 83F1 ← 83D9 ← NmiHandler ← I_NMI`
+(black screen + brief garble). Same `82C8` spin as the Dr Light freeze.
+
+### Measured root cause (boundary-ring S-delta at the wedge)
+- **`cpu->S` drifts into PAGE 2 (`$02ff`)** — should be ~`$01ff`. Net over-pop
+  of ~256 bytes accumulated during boot. Page-2 stack + the DMA-queue tail at
+  zero-page `$00A5` → corruption → walker spin.
+- **Normal JSR/RTS pairs are correctly balanced** (per-function S-delta `+2` =
+  callee pops the 2-byte frame its caller pushed — exactly right). The core ABI
+  is sound.
+- **The over-pops are all on the interrupt/DMA-path functions:** `84C3` `+9`,
+  `83D9` `−9`, `81E3` `−12`, and `I_NMI` occasionally drains `+500..+598`. These
+  are the functions that on hardware manipulate the **interrupt frame** the CPU
+  pushes on NMI/IRQ entry.
+
+### Leading hypothesis: the interrupt-frame boundary
+The recompiled NMI handler does `PHP`…`RTI` (see `mmx_rtl.c` ~437-446 comment),
+but the scheduler invokes it via a plain C call — `mmx_rtl.c:456 I_NMI(&g_cpu);`
+(and `:395 I_IRQ(&g_cpu);`) — which pushes **no** interrupt frame on `cpu->S`.
+Under Option-1 `cpu->S` is now load-bearing, so the handler's interrupt-frame
+pops (`RTI` / explicit `PLA/PLP`) have nothing matching to pop → over-pop →
+page-2 drift.
+
+### Fix site (next session)
+1. `mmx_rtl.c:456` (NMI) + `:395` (IRQ): push the native interrupt frame
+   (PB, PCH, PCL, P — 4 bytes) on `g_cpu.S` before the handler call.
+2. `codegen._emit_return` RTI path: **pop** that 4-byte frame (restore P from
+   the pulled byte; discard PC/PB — host C return carries control) instead of
+   the current no-pop `return _ps`.
+
+### CAVEAT — not necessarily a one-shot fix
+The deltas are messy (`−12`, `+9`, `+500`), not a clean single 4-byte frame, so
+the NMI/IRQ/DMA path likely has additional stack idioms (or the `I_NMI` +500
+drains are a separate TXS-reset / runaway-pop). Expect to iterate: after the
+interrupt-frame push, re-measure the boundary-ring S-delta and chase the next
+non-`+2`/`+3` function. The empirical loop (regen ~7min + build ~5min + boot +
+boundary S-delta) is the tool.
+
+### Status
+Parked on `feat/cpu-s-stack-model`. Working game = Production v0.1.1 (untouched;
+its exe predates the Option-1 regen). To restore the Oracle dev build to
+working: `git checkout main` (commit/stash first) + regen + rebuild.
+
+---
+
 ## Abandoned path: full cpu->S model for JSR/JSL/RTS/RTL (2026-05-24)
 
 **Status:** Rolled back. The narrower PEI-trampoline detector (ISSUES.md
