@@ -67,23 +67,47 @@ gate so EVERY RTS/RTL pops its frame — balanced (`cpu->S == _entry_s`) pops
 The `_classify_trampoline_returns` intra-procedural detector becomes
 unnecessary (cpu->S frames make trampolines work naturally).
 
-### THE high-risk decision (validate by test, not reasoning): NLR ↔ cpu->S symmetry
+### RESOLVED ABI (2026-05-26, after ChatGPT cross-check): host_return_valid
 
-`_pending_skip` (PLA*N NLR ABI) currently SKIPS the literal PLAs and signals
-skip-count up the C stack. With real frames on `cpu->S` there are two ways:
+Decision settled: **option (B)** — retire `_pending_skip` for PLA*N NLRs and
+let returns flow through `cpu->S` — PLUS an explicit **`host_return_valid`**
+flag so a function's RTS/RTL does NOT rely solely on `cpu->S == _entry_s` to
+decide whether a real paired host-C caller exists (that comparison
+false-positives when a function is *dispatched* into but happens to land at its
+entry S).
 
-- **(A) Keep `_pending_skip`** and make `_emit_return`'s NLR path + every
-  `_emit_call` SKIP-N propagation level pop exactly one frame. This is what the
-  prior attempt did — and the double-pop/under-pop symmetry is almost certainly
-  what leaked bytes and killed controller input. Must get the per-level pop
-  count EXACTLY right.
-- **(B) Remove `_pending_skip` for NLR** and let the PLA*N execute as real
-  `cpu->S` pops + RTS-as-`cpu_dispatch_pc` — NLR then "just works" through the
-  stack. Cleaner / most-complete, bigger change.
+`host_return_valid` (new `uint8 cpu->host_return_valid`; each function captures
+`uint8 _hrv = cpu->host_return_valid;` in its prologue):
 
-Lean (B) (most-complete per the global rule), but decide empirically: implement,
-regen MMX, repro the fish softlock, and read the boundary ring to confirm
-`cpu->S` stays balanced frame-to-frame (D56F enters at a stable S, exits m=1).
+- **Direct generated JSR/JSL call** (`_emit_call`): push the hardware return
+  frame AND set `cpu->host_return_valid = 1` before the C call. Callee enters
+  with `_hrv = 1`.
+- **Tail JMP/JML** (indirect-dispatch tail emitters, `emit_function.py`
+  tail-calls past `end:`): do NOT push; set `cpu->host_return_valid = _hrv`
+  (propagate THIS function's entry validity — a tail-call hands off our return
+  obligation), then C-call the tail target.
+- **`cpu_dispatch_pc_from`, PEI/RTL trampoline dispatch, dirty-RAM dynarec
+  entry, dispatch-trampoline targets**: enter with `cpu->host_return_valid = 0`
+  (no proven paired host caller) unless a paired host caller is proven.
+- **RTS/RTL**: ALWAYS pop the hardware frame. Return `RECOMP_RETURN_NORMAL`
+  **only when `_hrv == 1` AND the stack was balanced at entry**
+  (`cpu->S == _entry_s` before the pop). Otherwise `return
+  cpu_dispatch_pc_from(cpu, popped_pc24, ...)`.
+- **Retire `_pending_skip`** behavior: emit PLA/PLB/PLP/PLD/etc. as normal
+  `cpu->S` ops; the exposed return frame is consumed by RTS/RTL. Keep
+  `_classify_trampoline_returns` for DIAGNOSTICS only (boundary/stack-drift
+  tooling), not behavior.
+- **Interrupts stay a SEPARATE ABI**: IRQ/NMI push the interrupt frame on
+  entry; `RTI` pops the interrupt frame and is NOT treated like RTS/RTL. Do not
+  route RTI through the host_return_valid return logic.
+- **Dirty-RAM / executable-RAM** (if/when MMX hits it): dynarec fallback is
+  allowed but MUST emit compiled code using THIS same ABI, warn, and cache by
+  (PC + mode + code-hash). NO interpreter fallback. (Out of scope for the
+  immediate fish-softlock fix unless a RAM-exec path surfaces.)
+
+Validate empirically: regen MMX, repro the fish softlock, read the boundary
+ring to confirm `cpu->S` stays balanced frame-to-frame (D56F enters at a stable
+S, exits m=1) AND controller input + boot-to-Highway do not regress.
 
 ### Validation order (per the cross-game rule)
 
