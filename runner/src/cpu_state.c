@@ -334,6 +334,11 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
         cpu->S = entry_s_for_miss_restore;
         return RECOMP_RETURN_NORMAL;
     }
+    /* Option-1: a dispatched entry has no paired host-C caller. The target
+     * runs with host_return_valid=0 so its RTS/RTL re-dispatches on the
+     * popped PC rather than host-returning into this dispatch frame. The
+     * chain unwinds when a dispatch misses (S restored above) -> NORMAL. */
+    cpu->host_return_valid = 0;
     return fp(cpu);
 }
 

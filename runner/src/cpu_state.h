@@ -53,6 +53,18 @@ typedef struct CpuState {
     uint8  DB;
     uint8  PB;
 
+    /* Option-1 cpu->S return-frame ABI (see IMPROVEMENTS.md). 1 when the
+     * current function was entered via a direct generated JSR/JSL C call
+     * (a paired host-C caller exists and pushed a matching return frame on
+     * cpu->S). 0 when entered via cpu_dispatch_pc_from / PEI-RTL trampoline
+     * / interrupt / dynarec (no proven paired host caller). Each function
+     * captures it into a local `_hrv` at entry; the caller sets it right
+     * before every invoke (direct call -> 1; tail JMP/JML -> propagate the
+     * caller's _hrv; dispatch -> 0). RTS/RTL may return RECOMP_RETURN_NORMAL
+     * only when _hrv==1 AND the stack was balanced at entry (cpu->S ==
+     * _entry_s); otherwise it dispatches on the popped PC24. */
+    uint8  host_return_valid;
+
     /* Status register P (full byte). Individual bit mirrors below for
      * codegen efficiency — they MUST be kept in sync via the helpers
      * declared below (or RepFlags / SepFlags / SetFlag IR ops). */

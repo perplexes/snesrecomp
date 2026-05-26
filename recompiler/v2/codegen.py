@@ -1418,6 +1418,44 @@ def _emit_dispatch(insn) -> List[str]:
     return lines
 
 
+def _emit_return_frame_push(op: 'Call') -> List[str]:
+    """Option-1 cpu->S model: push the JSR/JSL return frame onto cpu->S
+    (matching hardware) so the callee's RTS/RTL pops a real frame and
+    trampoline / NLR returns resolve through cpu_dispatch_pc_from. Pushed
+    value = (return_addr - 1); RTS/RTL add 1 on pop (matches the pop
+    arithmetic in _emit_return). JSR pushes 2 bytes (16-bit, same bank);
+    JSL pushes 3 bytes (PBR + 16-bit). When source_pc24 is unknown
+    (synthesized call) push a correctly-SIZED sentinel — a balanced callee
+    pops+ignores it; the rare trampoline dispatches to a lookup miss →
+    NORMAL → host C unwind.
+
+    MUST be paired with the always-pop _emit_return; and every OTHER
+    invoke path (_emit_dispatch, indirect/tail emitters) must agree on
+    push-vs-no-push or cpu->S leaks. See IMPROVEMENTS.md "Option-1".
+    """
+    site = (op.source_pc24 & 0xFFFFFF) if op.source_pc24 is not None else None
+    # A direct generated JSR/JSL call always has a paired host-C caller +
+    # a pushed return frame, so the callee enters with host_return_valid=1.
+    hrv = "  cpu->host_return_valid = 1;  /* paired host caller */"
+    if op.long:
+        ret16 = ((site + 3) & 0xFFFF) if site is not None else 0xFFFF
+        pbr = ((site >> 16) & 0xFF) if site is not None else 0xFF
+        return [
+            "  /* JSL return frame -> cpu->S (Option-1) */",
+            f"  cpu_write8(cpu, 0x00, cpu->S, 0x{pbr:02x}); cpu->S = (uint16)(cpu->S - 1);",
+            f"  cpu_write8(cpu, 0x00, cpu->S, 0x{(ret16 >> 8) & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);",
+            f"  cpu_write8(cpu, 0x00, cpu->S, 0x{ret16 & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);",
+            hrv,
+        ]
+    ret16 = ((site + 2) & 0xFFFF) if site is not None else 0xFFFF
+    return [
+        "  /* JSR return frame -> cpu->S (Option-1) */",
+        f"  cpu_write8(cpu, 0x00, cpu->S, 0x{(ret16 >> 8) & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);",
+        f"  cpu_write8(cpu, 0x00, cpu->S, 0x{ret16 & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);",
+        hrv,
+    ]
+
+
 def _emit_call(op: Call) -> List[str]:
     if op.indirect:
         # cfg-required-dispatch-or-kill (2026-05-03): JSR (abs,X) is
@@ -1527,8 +1565,9 @@ def _emit_call(op: Call) -> List[str]:
         # JSL: PB save/restore wraps the switch. The propagation
         # block sits AFTER the PB restore so the caller's PB is
         # correct on the SKIP_N return path.
-        lines = [
-            "{",
+        lines = ["{"]
+        lines += _emit_return_frame_push(op)
+        lines += [
             "  uint8 _saved_pb = cpu->PB;",
             f"  cpu_trace_pb_change(cpu, 0, _saved_pb, {target_bank:#04x}, CPU_TR_JSL);",
             f"  cpu->PB = {target_bank:#04x};",
@@ -1556,8 +1595,9 @@ def _emit_call(op: Call) -> List[str]:
     # NB: emit_function.py's per-line scanner auto-injects a
     # RecompStackPop() before any line whose stripped text starts with
     # "return" — that includes the SKIP propagation `return` below.
-    lines = [
-        "{",
+    lines = ["{"]
+    lines += _emit_return_frame_push(op)
+    lines += [
         "  RecompReturn _r;",
         "  switch (((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)) {",
     ]
@@ -1631,53 +1671,42 @@ def _emit_return(op: Return) -> List[str]:
             "  if (_ps != RECOMP_RETURN_NORMAL) cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY);",
             "  return _ps; /* RTI */ }",
         ]
+    # ── Option-1 cpu->S return-frame ABI (RTS / RTL) ──────────────────
+    # ALWAYS pop the hardware return frame the matching JSR/JSL pushed
+    # (RTS = 2 bytes, RTL = 3 bytes; pop adds 1 to the 16-bit part, matching
+    # 65816 semantics + the _emit_return_frame_push value of return-1). Then:
+    #   - host-return (RECOMP_RETURN_NORMAL) ONLY when a paired host-C caller
+    #     exists (_hrv) AND the stack was balanced at entry (cpu->S ==
+    #     _entry_s before the pop): the popped frame IS that caller's pushed
+    #     return and the host C stack carries control back.
+    #   - otherwise (dispatched entry _hrv==0, OR a trampoline/NLR that
+    #     changed the net stack so _ret_s != _entry_s) dispatch on the popped
+    #     PC24. The chain unwinds when a dispatch misses (cpu_dispatch_pc_from
+    #     restores S and returns NORMAL).
+    # This subsumes the old _TRAMPOLINE_RETURNS + _pending_skip paths — PLA*N
+    # NLR now flows through the real cpu->S pops exposed below.
     label = "/* RTL */" if op.long else "/* RTS */"
-    is_trampoline = (op.source_pc24 is not None
-                     and (op.source_pc24 & 0xFFFFFF) in _TRAMPOLINE_RETURNS)
-    if not is_trampoline:
-        # Standard emit — no balance check, no dispatch. Same as the
-        # pre-fix behaviour for the vast majority of functions.
-        return [
-            "{ RecompReturn _ps = _pending_skip; _pending_skip = RECOMP_RETURN_NORMAL;",
-            "  cpu_trace_pending_skip_consume(cpu, 0, (uint8)_ps, g_last_recomp_func);",
-            "  if (_ps != RECOMP_RETURN_NORMAL) cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY);",
-            f"  return _ps; {label} }}",
-        ]
-    # Trampoline-flagged Return. Emit the balance-check + dispatch
-    # branch. NLR path takes precedence (PLA*N + RTS NLR fires before
-    # any unbalanced-delta check). On the balanced path (cpu->S ==
-    # _entry_s at this Return — e.g., we reached the join through a
-    # balanced predecessor), emit the standard return. On the
-    # unbalanced path (cpu->S != _entry_s — the actual PEI-trampoline
-    # case), pop and dispatch.
-    label_inner = label.strip('/* ')  # "RTS" or "RTL"
+    label_inner = "RTL" if op.long else "RTS"
+    src24 = (op.source_pc24 or 0) & 0xFFFFFF
     lines = [
-        "{ RecompReturn _ps = _pending_skip; _pending_skip = RECOMP_RETURN_NORMAL;",
-        "  cpu_trace_pending_skip_consume(cpu, 0, (uint8)_ps, g_last_recomp_func);",
-        "  if (_ps != RECOMP_RETURN_NORMAL) {",
-        "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY);",
-        f"    return _ps;  /* {label_inner} NLR */ }}",
-        "  if (cpu->S != _entry_s) {  /* PEI-trampoline: dispatch on popped PC */",
-        # Byte-wise pop from cpu->S (matches 65816 RTS/RTL semantics):
-        # increment then read, low byte first.
-        "    cpu->S = (uint16)(cpu->S + 1);",
-        "    uint16 _tramp_pcl = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
-        "    cpu->S = (uint16)(cpu->S + 1);",
-        "    uint16 _tramp_pch = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+        f"{{ uint16 _ret_s = cpu->S;  {label} pop hardware return frame */",
+        "  cpu->S = (uint16)(cpu->S + 1);",
+        "  uint16 _rpcl = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+        "  cpu->S = (uint16)(cpu->S + 1);",
+        "  uint16 _rpch = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
     ]
     if op.long:
-        lines.append("    cpu->S = (uint16)(cpu->S + 1);")
-        lines.append("    uint8 _tramp_pb = cpu_read8(cpu, 0x00, cpu->S);")
+        lines.append("  cpu->S = (uint16)(cpu->S + 1);")
+        lines.append("  uint8 _rpb = cpu_read8(cpu, 0x00, cpu->S);")
     else:
-        lines.append("    uint8 _tramp_pb = cpu->PB;")
+        lines.append("  uint8 _rpb = cpu->PB;")
     lines.extend([
-        "    uint32 _tramp_pc = (uint32)(((_tramp_pch << 8) | _tramp_pcl) + 1) & 0xFFFFu;",
-        "    uint32 _tramp_pc24 = ((uint32)_tramp_pb << 16) | _tramp_pc;",
-        "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_TRAMPOLINE);",
-        f"    return cpu_dispatch_pc_from(cpu, _tramp_pc24, _entry_s, 0x{(op.source_pc24 or 0) & 0xFFFFFF:06x}u);  /* {label_inner} trampoline */ }}",
-        # Balanced path through a trampoline-flagged Return — just
-        # return NORMAL like a regular Return. cpu->S unchanged.
-        f"  return RECOMP_RETURN_NORMAL;  /* {label_inner} balanced */ }}",
+        "  uint32 _rpc = (uint32)((((_rpch << 8) | _rpcl) + 1) & 0xFFFFu);",
+        "  uint32 _rpc24 = ((uint32)_rpb << 16) | _rpc;",
+        "  if (_hrv && _ret_s == _entry_s) {",
+        f"    return RECOMP_RETURN_NORMAL;  /* {label_inner} host return */ }}",
+        "  cpu_trace_mark_nlr_exit(BD_EXIT_KIND_TRAMPOLINE);",
+        f"  return cpu_dispatch_pc_from(cpu, _rpc24, _entry_s, 0x{src24:06x}u);  /* {label_inner} dispatch */ }}",
     ])
     return lines
 

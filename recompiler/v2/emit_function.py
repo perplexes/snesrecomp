@@ -384,24 +384,16 @@ def emit_function(rom: bytes, bank: int, start: int,
     block_ir: Dict[DecodeKey, List[IROp]] = {}
     def _tail_call_stmt(call_expr: str, comment: str,
                         nlr_info_for_block: Optional[dict] = None) -> str:
-        if nlr_info_for_block is None or not nlr_info_for_block.get('cross_tail'):
-            return (
-                f"{{ RecompReturn _tc = {call_expr}; "
-                f"RecompStackPop(); return _tc; }}  {comment}"
-            )
-        skip = int(nlr_info_for_block['skip'])
+        # Option-1 cpu->S ABI: a tail JMP/JML does NOT push a return frame;
+        # the tail callee inherits THIS function's host-return validity (a
+        # tail-call hands off our return obligation). NLR is no longer
+        # signalled via _pending_skip — it flows through cpu->S + dispatch,
+        # so nlr_info_for_block is ignored here.
+        del nlr_info_for_block
         return (
-            f"{{ RecompReturn _tc = {call_expr}; "
-            f"RecompReturn _nlr = _pending_skip; "
-            f"_pending_skip = RECOMP_RETURN_NORMAL; "
-            f"cpu_trace_pending_skip_consume(cpu, 0, (uint8)_nlr, g_last_recomp_func); "
-            f"if (_nlr == RECOMP_RETURN_NORMAL) _nlr = RECOMP_RETURN_SKIP_{skip}; "
-            f"if (_tc != RECOMP_RETURN_NORMAL) {{ "
-            f"int _combined = (int)_tc + (int)_nlr; "
-            f"_nlr = (RecompReturn)(_combined > (int)RECOMP_RETURN_SKIP_3 ? "
-            f"(int)RECOMP_RETURN_SKIP_3 : _combined); }} "
-            f"cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY); "
-            f"RecompStackPop(); return _nlr; }}  {comment}"
+            f"{{ cpu->host_return_valid = _hrv; "
+            f"RecompReturn _tc = {call_expr}; "
+            f"RecompStackPop(); return _tc; }}  {comment}"
         )
 
     for key in block_order:
@@ -770,14 +762,20 @@ def emit_function(rom: bytes, bank: int, start: int,
             'pla_at_start': True,
         }
 
-    # Map key -> {skip, pla_start_ir_idx, pla_count}
+    # Option-1 cpu->S return-frame ABI (see IMPROVEMENTS.md): the PLA*N NLR
+    # idiom is now handled by emitting the PLAs as NORMAL cpu->S pops and
+    # letting RTS/RTL consume the exposed return frame (host_return_valid +
+    # cpu_dispatch_pc). The detector is retained for DIAGNOSTICS ONLY and no
+    # longer drives emission, so `nlr_skip_by_block` stays EMPTY — the emit
+    # loop then emits every PLA/PLP and every Return normally.
     nlr_skip_by_block: Dict[DecodeKey, dict] = {}
+    nlr_diag_by_block: Dict[DecodeKey, dict] = {}  # diagnostics only; NOT used for emit
     for key in block_order:
         info = _detect_nlr(key)
         if info is None:
             info = _detect_nlr_at_start(key)
         if info is not None:
-            nlr_skip_by_block[key] = info
+            nlr_diag_by_block[key] = info
 
     # Bank where THIS function's body lives. Used to compute the 24-bit
     # address of cross-function targets (which always lie within the same
@@ -1407,6 +1405,14 @@ def emit_function(rom: bytes, bank: int, start: int,
     # branch (mmx_08_v2.c bank-08 build break, 2026-05-24).
     src.append(f'  uint16 _entry_s = cpu->S;')
     src.append(f'  (void)_entry_s;  /* used by trampoline balance check */')
+    # Option-1 cpu->S return-frame ABI (see IMPROVEMENTS.md): capture whether
+    # a paired host-C caller exists at entry. RTS/RTL may host-return NORMAL
+    # only when _hrv==1 AND the stack is balanced (cpu->S == _entry_s);
+    # otherwise it dispatches on the popped PC. The caller sets
+    # cpu->host_return_valid right before each invoke (direct call -> 1;
+    # tail JMP/JML -> propagate the caller's _hrv; dispatch -> 0).
+    src.append(f'  uint8 _hrv = cpu->host_return_valid;')
+    src.append(f'  (void)_hrv;')
     for i, key in enumerate(block_order):
         src.append(f"  {_label_for(key)}:")
         # Trace block entry — gives us the SNES PC chain in the trace ring.
