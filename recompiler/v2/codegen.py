@@ -126,6 +126,23 @@ def add_trampoline_returns(s: set) -> None:
     _TRAMPOLINE_RETURNS = _TRAMPOLINE_RETURNS | set(s)
 
 
+def take_trampoline_returns() -> set:
+    """Return + clear the per-Return-site trampoline classification set.
+
+    Used by the parallel emit path in v2_regen: each worker process
+    accumulates trampoline classifications during emit_bank in its own
+    Python module-level _TRAMPOLINE_RETURNS (workers are separate
+    processes, not threads, so the global is worker-local). At end of
+    each work item the worker drains via this function and returns the
+    set to main; main unions across workers and reseeds for the next
+    pass via set_trampoline_returns().
+    """
+    global _TRAMPOLINE_RETURNS
+    out = _TRAMPOLINE_RETURNS
+    _TRAMPOLINE_RETURNS = set()
+    return out
+
+
 def set_force_variant_at(d: Dict[int, Tuple[int, int]]) -> None:
     """Replace the per-site variant-pin map.
 

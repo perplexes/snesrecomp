@@ -37,7 +37,9 @@ from v2.codegen import (  # noqa: E402
     set_name_resolver,
     set_rom_size,
     set_force_variant_at,
+    set_trampoline_returns,
     take_rejected_call_targets,
+    take_trampoline_returns,
     take_unresolved_call_targets,
     take_unresolved_goto_targets,
 )
@@ -108,6 +110,91 @@ def _lint_stubs(out_dir: pathlib.Path) -> list[tuple[str, int, str, str]]:
     return hits
 
 
+def _emit_bank_one(args_dict: dict) -> dict:
+    """Worker function: emit one bank end-to-end and return all outputs.
+
+    Defined at module level so multiprocessing.Pool can pickle it on
+    Windows (spawn start method). Re-applies codegen globals from
+    args_dict on every call — worker processes do not share state with
+    main, and per-pass dynamic state (name_map / trampoline_returns /
+    force_variant_at) can change between calls within one worker.
+
+    Sequential path (--jobs 1) calls this directly without pickling.
+    Parallel path (--jobs >1) submits via Pool.map; each work item is
+    self-contained so worker processes have everything they need.
+
+    Returns a dict with `status: 'ok'|'fail'`, the emitted source, and
+    every per-bank collector list plus drained codegen globals
+    (`take_*` results). Main merges these into the global accumulators
+    after the pass."""
+    set_rom_size(args_dict['rom_size'])
+    set_name_resolver(args_dict['name_map'])
+    set_force_variant_at(args_dict['force_variant_at'])
+    set_trampoline_returns(args_dict['trampoline_returns'])
+
+    bank = args_dict['bank']
+    cfg = args_dict['cfg']
+    rom = args_dict['rom']
+    cfg_bank_field = getattr(cfg, 'bank', bank)
+    bank_field_warning = None
+    if cfg_bank_field != bank:
+        bank_field_warning = (
+            f"  bank{cfg_bank_field:02X}.cfg: bank field "
+            f"${cfg_bank_field:02X} doesn't match filename "
+            f"${bank:02X}; using filename")
+
+    bank_suppressed: list = []
+    bank_const_z_folds: list = []
+    bank_dispatch_suppressed: list = []
+    bank_unresolved_indirects: list = []
+
+    try:
+        src = emit_bank(rom, bank=bank, entries=cfg.entries,
+                        dispatch_helpers=args_dict['dispatch_helpers'],
+                        indirect_call_tables=getattr(
+                            cfg, 'indirect_call_tables', None),
+                        indirect_dispatch=args_dict['indirect_dispatch_map'],
+                        suppressed_collector=bank_suppressed,
+                        const_z_fold_collector=bank_const_z_folds,
+                        dispatch_target_suppressed_collector=
+                            bank_dispatch_suppressed,
+                        unresolved_indirect_collector=
+                            bank_unresolved_indirects,
+                        data_regions=cfg.data_regions or None,
+                        exclude_ranges=cfg.exclude_ranges or None,
+                        callee_exit_mx=args_dict['callee_exit_mx'],
+                        callee_exit_mx_modes=args_dict['callee_exit_mx_modes'],
+                        hle_spc_upload=getattr(
+                            cfg, 'hle_spc_upload', None) or None,
+                        hle_func=getattr(
+                            cfg, 'hle_func', None) or None,
+                        hle_dispatch=getattr(
+                            cfg, 'hle_dispatch', None) or None)
+    except Exception as e:
+        return {
+            'bank': bank,
+            'status': 'fail',
+            'error': f"{type(e).__name__}: {e}",
+            'traceback': traceback.format_exc(),
+            'bank_field_warning': bank_field_warning,
+        }
+
+    return {
+        'bank': bank,
+        'status': 'ok',
+        'src': src,
+        'cfg_entries_count': len(cfg.entries),
+        'suppressed': bank_suppressed,
+        'const_z_folds': bank_const_z_folds,
+        'dispatch_suppressed': bank_dispatch_suppressed,
+        'unresolved_indirects': bank_unresolved_indirects,
+        'unresolved_calls': take_unresolved_call_targets(),
+        'rejected_call_targets': take_rejected_call_targets(),
+        'trampoline_returns_local': take_trampoline_returns(),
+        'bank_field_warning': bank_field_warning,
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="v2 regen — emit one C file per bank cfg")
     p.add_argument('--rom', required=True, help='Path to game ROM file (.sfc)')
@@ -137,6 +224,29 @@ def main() -> int:
                         'Default 1800s (30 min). On timeout, prints '
                         'phase + cache stats to stderr and exits 124. '
                         'Set to 0 to disable.')
+    # Default --jobs is read from SNESRECOMP_JOBS env var (matching the
+    # SNESRECOMP_TRACE convention in the runner). Hardcoded fallback is
+    # 1 (sequential) — safe for low-to-mid-end machines and preserves
+    # output bit-identicality against the pre-parallel pipeline.
+    # Power users set the env var once (e.g. `setx SNESRECOMP_JOBS 8`
+    # on a high-core desktop) and forget.
+    _env_jobs = os.environ.get('SNESRECOMP_JOBS', '').strip()
+    try:
+        _default_jobs = int(_env_jobs) if _env_jobs else 1
+    except ValueError:
+        print(f"  WARN: SNESRECOMP_JOBS={_env_jobs!r} is not an integer; "
+              f"defaulting to 1", file=sys.stderr)
+        _default_jobs = 1
+    p.add_argument('--jobs', type=int, default=_default_jobs,
+                   help='Parallel worker count for per-bank emit. '
+                        'Reads SNESRECOMP_JOBS env var as default '
+                        '(currently: {}); hardcoded fallback is 1. '
+                        'Set to N to spread emit across N processes '
+                        'via multiprocessing.Pool. Map to physical '
+                        'cores for CPU-bound work (e.g. 8 on an '
+                        '8C/16T desktop); hyperthreads rarely help '
+                        'and compete for execution units.'.format(
+                            _default_jobs))
     args = p.parse_args()
 
     # ── Phase-tracking + watchdog ───────────────────────────────────
@@ -790,6 +900,25 @@ def main() -> int:
     # leaves ~239 unresolved externals; 24 converges in practice.
     max_passes = 24
     last_unresolved: set = set()
+
+    # A2: parallel emit Pool — None when --jobs <= 1 (sequential, in-
+    # process call to _emit_bank_one). Pool persists across passes so
+    # workers pay the Python-import startup cost once. Per-pass dynamic
+    # state (name_map, callee_exit_mx, trampoline_returns) is passed in
+    # each work item; workers do not rely on shared globals.
+    pool = None
+    if args.jobs > 1:
+        import multiprocessing as _mp
+        pool = _mp.Pool(processes=args.jobs)
+        print(f"v2_regen: parallel emit enabled — {args.jobs} workers")
+
+    # Cumulative drains across passes. Pre-A2 these lived in codegen
+    # module globals; with workers each one has its own — we union
+    # into these main-process accumulators after every pass and
+    # reseed via set_trampoline_returns() for the next pass.
+    cumulative_trampoline_returns: set = set()
+    cumulative_rejected_calls: set = set()
+
     for pass_idx in range(max_passes):
         _phase(f"emit_pass_{pass_idx}")
         # Clear any leftovers from prior session/process.
@@ -814,73 +943,79 @@ def main() -> int:
         # Aggregate unresolved indirect JMP/JML/JSR sites. Hard-fail
         # gate: any entry here means a stub would otherwise be emitted.
         all_unresolved_indirects: list = []
+        # Build per-bank work items. Banks outside the --banks filter
+        # are skipped here; the work item dict carries everything
+        # _emit_bank_one needs (no shared globals across workers).
+        work_items: list = []
         for bank, cfg_path, cfg in parsed:
             if only_banks is not None and bank not in only_banks:
-                # Skip emit for filtered banks; keep their existing .c on
-                # disk. Cross-bank name resolution + autopromote still
-                # operate over all banks above; only the file write +
-                # per-bank decode are skipped.
                 if pass_idx == 0:
                     print(f"  SKIP  bank ${bank:02X}: not in --banks filter (keeping existing .c)")
                 continue
-            out_path = out_dir / f'{args.prefix}_{bank:02x}_v2.c'
-            try:
-                if cfg.bank != bank:
-                    print(f"  {cfg_path.name}: bank field ${cfg.bank:02X} doesn't match filename ${bank:02X}; using filename")
-                bank_suppressed: list = []
-                bank_const_z_folds: list = []
-                bank_dispatch_suppressed: list = []
-                bank_unresolved_indirects: list = []
-                # Build per-bank `indirect_dispatch` map keyed by
-                # 24-bit site PC for the decoder. cfg field is a list
-                # of dicts with 16-bit `site_pc16` — combine with this
-                # bank to form the 24-bit key.
-                ind_dispatch_map = None
-                ind_list = getattr(cfg, 'indirect_dispatch', None) or []
-                if ind_list:
-                    ind_dispatch_map = {}
-                    for d in ind_list:
-                        pc24 = (bank << 16) | (d['site_pc16'] & 0xFFFF)
-                        ind_dispatch_map[pc24] = d
-                src = emit_bank(rom, bank=bank, entries=cfg.entries,
-                                dispatch_helpers=dispatch_helpers,
-                                indirect_call_tables=getattr(
-                                    cfg, 'indirect_call_tables', None),
-                                indirect_dispatch=ind_dispatch_map,
-                                suppressed_collector=bank_suppressed,
-                                const_z_fold_collector=bank_const_z_folds,
-                                dispatch_target_suppressed_collector=
-                                    bank_dispatch_suppressed,
-                                unresolved_indirect_collector=
-                                    bank_unresolved_indirects,
-                                data_regions=cfg.data_regions or None,
-                                exclude_ranges=cfg.exclude_ranges or None,
-                                callee_exit_mx=callee_exit_mx,
-                                callee_exit_mx_modes=callee_exit_mx_modes,
-                                hle_spc_upload=getattr(
-                                    cfg, 'hle_spc_upload', None) or None,
-                                hle_func=getattr(
-                                    cfg, 'hle_func', None) or None,
-                                hle_dispatch=getattr(
-                                    cfg, 'hle_dispatch', None) or None)
-                out_path.write_text(src, encoding='utf-8', newline='\n')
-                all_suppressed.extend(bank_suppressed)
-                all_const_z_folds.extend(bank_const_z_folds)
-                all_dispatch_suppressed.extend(bank_dispatch_suppressed)
-                all_unresolved_indirects.extend(bank_unresolved_indirects)
-                if pass_idx == 0:
-                    print(f"  OK    bank ${bank:02X}: {len(cfg.entries)} entries -> {out_path}")
-                succeeded += 1
-            except Exception as e:
-                print(f"  FAIL  bank ${bank:02X}: {type(e).__name__}: {e}")
-                traceback.print_exc()
-                failed.append((bank, str(e)))
+            ind_dispatch_map = None
+            ind_list = getattr(cfg, 'indirect_dispatch', None) or []
+            if ind_list:
+                ind_dispatch_map = {}
+                for d in ind_list:
+                    pc24 = (bank << 16) | (d['site_pc16'] & 0xFFFF)
+                    ind_dispatch_map[pc24] = d
+            work_items.append({
+                'bank': bank,
+                'cfg': cfg,
+                'rom': rom,
+                'rom_size': len(rom),
+                'dispatch_helpers': dispatch_helpers,
+                'indirect_dispatch_map': ind_dispatch_map,
+                'name_map': name_map,
+                'force_variant_at': force_variant_map,
+                'trampoline_returns': cumulative_trampoline_returns,
+                'callee_exit_mx': callee_exit_mx,
+                'callee_exit_mx_modes': callee_exit_mx_modes,
+            })
 
-        # Drain Call-target demands only. Goto targets are no longer
-        # auto-promoted (would split asm routines and strand PHB/PLB —
-        # the title-screen-loop regression). The decoder imports them
-        # into the source function's CFG instead.
-        unresolved_calls = take_unresolved_call_targets()
+        # Run emit. Pool path used when --jobs > 1 and there's more
+        # than one bank to emit; jobs=1 path stays fully in-process
+        # (no pickling, byte-identical output to the pre-A2 pipeline).
+        if pool is not None and len(work_items) > 1:
+            results = pool.map(_emit_bank_one, work_items)
+        else:
+            results = [_emit_bank_one(wi) for wi in work_items]
+
+        # Merge worker outputs back into the main process's
+        # per-pass + cumulative accumulators.
+        pass_unresolved_calls: set = set()
+        for r in results:
+            if r.get('bank_field_warning'):
+                print(r['bank_field_warning'])
+            bank = r['bank']
+            if r['status'] == 'fail':
+                print(f"  FAIL  bank ${bank:02X}: {r['error']}")
+                if r.get('traceback'):
+                    print(r['traceback'])
+                failed.append((bank, r['error']))
+                continue
+            out_path = out_dir / f'{args.prefix}_{bank:02x}_v2.c'
+            out_path.write_text(r['src'], encoding='utf-8', newline='\n')
+            all_suppressed.extend(r['suppressed'])
+            all_const_z_folds.extend(r['const_z_folds'])
+            all_dispatch_suppressed.extend(r['dispatch_suppressed'])
+            all_unresolved_indirects.extend(r['unresolved_indirects'])
+            pass_unresolved_calls.update(r['unresolved_calls'])
+            cumulative_rejected_calls.update(r['rejected_call_targets'])
+            cumulative_trampoline_returns.update(
+                r['trampoline_returns_local'])
+            if pass_idx == 0:
+                print(f"  OK    bank ${bank:02X}: {r['cfg_entries_count']} entries -> {out_path}")
+            succeeded += 1
+        # Reseed main's _TRAMPOLINE_RETURNS for any later main-process
+        # emit paths (none today) and keep main's view consistent.
+        set_trampoline_returns(cumulative_trampoline_returns)
+
+        # Call-target demands. Workers drain their own globals during
+        # emit and return them; pass_unresolved_calls is the union of
+        # those drains. Also union main's set in case the autoroute
+        # pre-passes (which run in main) leaked any.
+        unresolved_calls = pass_unresolved_calls | take_unresolved_call_targets()
         last_unresolved = unresolved_calls
         if not unresolved_calls:
             break
@@ -946,6 +1081,13 @@ def main() -> int:
                 if entry.name:
                     name_map[(bank2 << 16) | (entry.start & 0xFFFF)] = entry.name
         set_name_resolver(name_map)
+
+    # A2: parallel emit complete. Close workers; the remaining stub-
+    # file + dispatch-table emit run sequentially in main.
+    if pool is not None:
+        pool.close()
+        pool.join()
+        pool = None
 
     # Final pass: any still-unresolved Call targets after the last emit
     # belong to ROM banks not in the cfg set (e.g. data decoded as code
@@ -1201,7 +1343,7 @@ def main() -> int:
                   f"[dead -> ${f.dead_pc24:06X}]  "
                   f"in ${f.func_entry_pc24:06X} M{f.entry_m}X{f.entry_x}")
 
-    rejected = take_rejected_call_targets()
+    rejected = cumulative_rejected_calls | take_rejected_call_targets()
     if rejected:
         print()
         print(f"Rejected JSR/JSL targets (out-of-LoROM, decoder followed "
