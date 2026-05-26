@@ -1682,12 +1682,20 @@ def _emit_return(op: Return) -> List[str]:
     # in this codegen, but cpu_trace_mark_nlr_exit kept for
     # completeness / future-proofing for sub-classes of NLR).
     if op.interrupt:
+        # Option-1 interrupt ABI: RTI pops the hardware interrupt frame that
+        # the NMI/IRQ entry pushed (native: P, PCL, PCH, PB = 4 bytes;
+        # emulation: P, PCL, PCH = 3 bytes). Restore P from the pulled byte
+        # (like PLP); the pulled PC/PB are discarded — the host C return
+        # carries control back to the scheduler (mmx_rtl.c) that invoked the
+        # handler. MUST be paired with the interrupt-frame PUSH at the
+        # I_NMI/I_IRQ invocation; without that push this over-pops cpu->S.
         return [
             "cpu_trace_event(cpu, 0, CPU_TR_RTI, 0, 0);",
-            "{ RecompReturn _ps = _pending_skip; _pending_skip = RECOMP_RETURN_NORMAL;",
-            "  cpu_trace_pending_skip_consume(cpu, 0, (uint8)_ps, g_last_recomp_func);",
-            "  if (_ps != RECOMP_RETURN_NORMAL) cpu_trace_mark_nlr_exit(BD_EXIT_KIND_NLR_PRIMARY);",
-            "  return _ps; /* RTI */ }",
+            "{ cpu->S = (uint16)(cpu->S + 1); cpu->P = cpu_read8(cpu, 0x00, cpu->S); cpu_p_to_mirrors(cpu);",
+            "  cpu->S = (uint16)(cpu->S + 2);  /* pull + discard PC */",
+            "  if (!cpu->emulation) cpu->S = (uint16)(cpu->S + 1);  /* native: pull + discard PB */",
+            "  cpu_trace_px_record(cpu, 0, 3 /*RTI*/, cpu->P, cpu->P);",
+            "  return RECOMP_RETURN_NORMAL; /* RTI: popped interrupt frame */ }",
         ]
     # ── Option-1 cpu->S return-frame ABI (RTS / RTL) ──────────────────
     # ALWAYS pop the hardware return frame the matching JSR/JSL pushed
