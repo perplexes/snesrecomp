@@ -320,6 +320,30 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr);
 void   cpu_write8 (CpuState *cpu, uint8 bank, uint16 addr, uint8  v);
 void   cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v);
 
+/* ── Interrupt-frame ABI (Option-1 cpu->S model) ────────────────────────── */
+
+/* Model the 65816 hardware interrupt-entry push so a handler invoked via a
+ * plain host-C call (the game's rtl I_NMI / I_IRQ wrappers) leaves cpu->S in
+ * the state the handler's RTI expects. Hardware pushes, in order (S
+ * decreasing): native = PB, PCH, PCL, P (4 bytes); emulation = PCH, PCL, P
+ * (3 bytes). The handler's RTI (codegen _emit_return op.interrupt) pops in
+ * the mirror order: pull P (top), discard PC (2), native discard PB (1).
+ * PC/PB are discarded on RTI (host-C return carries control), so only P must
+ * be live — it is restored to the interrupted code. MUST be paired with that
+ * RTI pop; without this push the RTI over-pops cpu->S. */
+static inline void cpu_push_interrupt_frame(CpuState *cpu) {
+    /* v2 CpuState has no runtime PC (control flow is host-C call structure),
+     * so the PC bytes are pushed as zero placeholders — RTI discards them.
+     * Only P is live; cpu_mirrors_to_p syncs it from the flag mirrors first. */
+    cpu_mirrors_to_p(cpu);
+    if (!cpu->emulation) {
+        cpu_write8(cpu, 0x00, cpu->S, cpu->PB); cpu->S = (uint16)(cpu->S - 1);
+    }
+    cpu_write8(cpu, 0x00, cpu->S, 0x00); cpu->S = (uint16)(cpu->S - 1);  /* PCH */
+    cpu_write8(cpu, 0x00, cpu->S, 0x00); cpu->S = (uint16)(cpu->S - 1);  /* PCL */
+    cpu_write8(cpu, 0x00, cpu->S, cpu->P); cpu->S = (uint16)(cpu->S - 1);
+}
+
 /* ── Initialisation ─────────────────────────────────────────────────────── */
 
 /* Initialise `cpu` to a 65816 reset state: emulation=1, P=0x34
