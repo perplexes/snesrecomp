@@ -323,14 +323,16 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
     }
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
     if (fp == NULL) {
-        /* Not found. Restore cpu->S to the trampoline caller's _entry_s
-         * so the residual PEI'd bytes (which the would-be V's body
-         * would have consumed via PLAs) don't leak up as a phantom
-         * stack push. Without this restore, the caller's downstream
-         * stack ops would read garbage from the PEI'd region, causing
-         * subtle corruption (e.g. MMX Dr Light "sprite vanish" 2026-
-         * 05-24: 2 miss-dispatches × 3-byte leak = 6 bytes of cpu->S
-         * drift that corrupted sprite-engine state). */
+        /* Not found: the popped (PB:PC) is a normal mid-caller return addr,
+         * not a known function entry. Unwind by restoring cpu->S to the value
+         * the caller expects after THIS function returns and returning NORMAL.
+         * The caller passes entry_s_for_miss_restore = entry_s + frame_size
+         * (the S after this function pops its own return frame) — so a
+         * balanced hrv=0 callee returns with its frame correctly popped, and a
+         * PEI trampoline discards its residual params up to that point. Passing
+         * bare entry_s here would under-pop by frame_size and leak the caller's
+         * frame on every miss (the heavy-load DMA-queue-corruption softlock;
+         * cf. MMX Dr Light "sprite vanish" 2026-05-24). */
         cpu->S = entry_s_for_miss_restore;
         return RECOMP_RETURN_NORMAL;
     }

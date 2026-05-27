@@ -1726,13 +1726,24 @@ def _emit_return(op: Return) -> List[str]:
         lines.append("  uint8 _rpb = cpu_read8(cpu, 0x00, cpu->S);")
     else:
         lines.append("  uint8 _rpb = cpu->PB;")
+    # Frame size this RTS/RTL pops (RTS = 2 bytes, RTL = 3). The dispatch
+    # miss-restore below must reflect that this function popped its OWN return
+    # frame, i.e. restore S to entry_s + frame_size — NOT bare entry_s.
+    frame_sz = 3 if op.long else 2
     lines.extend([
         "  uint32 _rpc = (uint32)((((_rpch << 8) | _rpcl) + 1) & 0xFFFFu);",
         "  uint32 _rpc24 = ((uint32)_rpb << 16) | _rpc;",
         "  if (_hrv && _ret_s == _entry_s) {",
         f"    return RECOMP_RETURN_NORMAL;  /* {label_inner} host return */ }}",
         "  cpu_trace_mark_nlr_exit(BD_EXIT_KIND_TRAMPOLINE);",
-        f"  return cpu_dispatch_pc_from(cpu, _rpc24, _entry_s, 0x{src24:06x}u);  /* {label_inner} dispatch */ }}",
+        # Miss-restore = post-return-pop S (entry_s + frame_size). On a dispatch
+        # MISS the popped PC is a normal return addr (mid-caller, not a function
+        # entry), so this function must leave S as if it had popped its own
+        # return frame. Passing bare entry_s under-pops by frame_size and leaks
+        # the caller's frame on every miss — an hrv=0 callee dispatches on every
+        # RTS, so under heavy load (hundreds of misses/frame) cpu->S drifts down
+        # into zero page and corrupts the DMA queue tail -> 82C8/BA48 spin.
+        f"  return cpu_dispatch_pc_from(cpu, _rpc24, (uint16)(_entry_s + {frame_sz}u), 0x{src24:06x}u);  /* {label_inner} dispatch */ }}",
     ])
     return lines
 
