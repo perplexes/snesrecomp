@@ -283,7 +283,7 @@ def main() -> int:
         watchdog.daemon = True
         watchdog.start()
 
-    set_decode_cache_enabled(not args.no_decode_cache)
+    set_decode_cache_enabled(False)  # hardcode off (cache key bug)
     only_banks: set | None = None
     if args.banks:
         only_banks = set()

@@ -1013,7 +1013,7 @@ def classify_dispatch_helper(rom: bytes, bank: int, addr: int):
 _DECODE_CACHE: Dict[tuple, "FunctionDecodeGraph"] = {}
 _DECODE_CACHE_HITS = 0
 _DECODE_CACHE_MISSES = 0
-_DECODE_CACHE_ENABLED = True
+_DECODE_CACHE_ENABLED = False  # off by default (cache key bug)
 
 
 def set_decode_cache_enabled(enabled: bool) -> None:
