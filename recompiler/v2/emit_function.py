@@ -817,26 +817,30 @@ def emit_function(rom: bytes, bank: int, start: int,
         if (tail_call_pc16 is not None
                 and tail_call_target_name is not None
                 and (target.pc & 0xFFFF) == (tail_call_pc16 & 0xFFFF)):
-            sib_suffix = _variant_suffix(target.m, target.x)
-            # Register cross-variant Call demand so v2_regen's auto-
-            # promote synthesizes the (m, x) body when it differs from
-            # the sibling's cfg-declared default. Without this, the
-            # C linker fails with "unresolved external _M{m}X{x}" when
-            # the boundary's (m, x) doesn't match the cfg-default of
-            # the sibling — exactly what tripped the zelda3 cross-
-            # variant externals (NMI_RunTileMapUpdateDMA_M0X1,
-            # SpotlightInternal_M1X0, etc.) on the 2026-05-17
-            # tail-call-past-end class fix.
+            # Dispatch on runtime (m, x), not the static boundary key: a
+            # fall-through continues with the live mode, which can diverge
+            # from the static decode (decoder m/x drift). See the
+            # tail-call-past-end case below for the full rationale and the
+            # SMW RunPlayerBlockCode wrong-variant corruption it fixes.
+            # Demand all 4 variants so auto-promote synthesizes them (this
+            # also subsumes the cross-variant-externals demand the prior
+            # single-variant register_call_demand handled).
             from v2.codegen import register_call_demand
             tail_pc24 = (_SAME_BANK << 16) | (target.pc & 0xFFFF)
-            register_call_demand(tail_pc24, target.m, target.x)
+            for _em, _ex in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                register_call_demand(tail_pc24, _em, _ex)
+            _sw = " ".join(
+                f"case {(_em << 1) | _ex}: _tc = {tail_call_target_name}"
+                f"{_variant_suffix(_em, _ex)}(cpu); break;"
+                for _em, _ex in ((0, 0), (0, 1), (1, 0), (1, 1))
+            )
             return (
-                f"{prefix}{{ "
-                f"RecompReturn _tc = {tail_call_target_name}{sib_suffix}(cpu); "
-                f"RecompStackPop(); "
-                f"return _tc; "
-                f"}}  /* tail_call into sibling fn at ${target.pc & 0xFFFF:04X} "
-                f"(cfg tail_call: directive) */"
+                f"{prefix}{{ RecompReturn _tc; "
+                f"switch (((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)) {{ "
+                f"{_sw} default: _tc = RECOMP_RETURN_NORMAL; break; }} "
+                f"RecompStackPop(); return _tc; }}"
+                f"  /* tail_call into sibling at ${target.pc & 0xFFFF:04X} "
+                f"(cfg tail_call:), runtime (m,x) dispatch */"
             )
 
         # Tail-call past `end:` boundary into a declared sibling
@@ -866,15 +870,31 @@ def emit_function(rom: bytes, bank: int, start: int,
         from v2.codegen import get_name_for_pc, register_call_demand
         sibling_name = get_name_for_pc(target_pc24)
         if sibling_name is not None:
-            sib_suffix = _variant_suffix(target.m, target.x)
-            register_call_demand(target_pc24, target.m, target.x)
+            # A fall-through into the sibling continues executing with the
+            # CURRENT runtime (m, x) — which can diverge from this boundary's
+            # STATIC decode key (decoder m/x drift; e.g. SMW
+            # RunPlayerBlockCode $EE1D is entered at runtime x=1 while the
+            # static decode said x=0). Hardcoding the static variant then
+            # runs a wrong-width body: operands misdecode and, under the
+            # Option-1 cpu->S ABI, a phantom RTS/PHD pops cpu->S and corrupts
+            # the stack. Dispatch on runtime cpu->m_flag/x_flag instead, the
+            # same way codegen._emit_call resolves JSR/JSL variants. Demand
+            # all 4 variants so v2_regen auto-promote synthesizes whichever
+            # the static analysis didn't produce.
+            for _em, _ex in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                register_call_demand(target_pc24, _em, _ex)
+            _sw = " ".join(
+                f"case {(_em << 1) | _ex}: _tc = {sibling_name}"
+                f"{_variant_suffix(_em, _ex)}(cpu); break;"
+                for _em, _ex in ((0, 0), (0, 1), (1, 0), (1, 1))
+            )
             return (
-                f"{prefix}{{ "
-                f"RecompReturn _tc = {sibling_name}{sib_suffix}(cpu); "
-                f"RecompStackPop(); "
-                f"return _tc; "
-                f"}}  /* tail-call past end: into {sibling_name}{sib_suffix} "
-                f"at ${target.pc & 0xFFFF:04X} */"
+                f"{prefix}{{ RecompReturn _tc; "
+                f"switch (((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)) {{ "
+                f"{_sw} default: _tc = RECOMP_RETURN_NORMAL; break; }} "
+                f"RecompStackPop(); return _tc; }}"
+                f"  /* tail-call past end -> {sibling_name} at "
+                f"${target.pc & 0xFFFF:04X}, runtime (m,x) dispatch */"
             )
 
         # Unresolvable cross-function jump.
