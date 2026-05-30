@@ -79,6 +79,11 @@ void debug_server_on_reg_write(uint16_t adr, uint8_t val);
 // in Oracle builds so probes can query the ring backward in history.
 void debug_server_on_vram_write(uint32_t byte_addr, uint8_t value);
 
+// Stage-load-in tracer: snapshot per-frame BG-write counts + game-mode /
+// scroll / brightness / DMA-tail into a ring. Call once per frame from the
+// per-game frame loop (MmxRunOneFrameOfGame). Query via "loadin_get".
+void debug_server_loadin_tick(void);
+
 // Oracle-side VRAM byte-write trace. Same shape as the recomp ring
 // above but written by the snes9x trampoline; no recomp-side
 // attribution because snes9x is the reference. cmd_vram_write_diff
@@ -106,6 +111,7 @@ static inline void debug_server_record_frame(int frame) { (void)frame; }
 static inline void debug_server_set_ram(uint8_t *ram, uint32_t ram_size) { (void)ram; (void)ram_size; }
 static inline void debug_server_on_reg_write(uint16_t adr, uint8_t val) { (void)adr; (void)val; }
 static inline void debug_server_on_vram_write(uint32_t byte_addr, uint8_t value) { (void)byte_addr; (void)value; }
+static inline void debug_server_loadin_tick(void) { }
 static inline void debug_server_on_oracle_vram_write(uint32_t byte_addr, uint8_t value) { (void)byte_addr; (void)value; }
 static inline void debug_server_profile_push(const char *name) { (void)name; }
 static inline void debug_server_profile_latch(int frame_num) { (void)frame_num; }

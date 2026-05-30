@@ -306,7 +306,30 @@ static struct {
     VramTraceEntry *log;        /* heap-allocated; calloc'd at init */
 } s_vram_trace = {0};
 
+/* ---- Stage-load-in tracer (per-frame; diagnoses the highway/boss-select
+ * background-loads-late issue). Always-on, independent of s_vram_trace's
+ * arm state, so the counters below increment even when no VRAM trace is
+ * armed. BG VRAM byte regions (byte address into 64 KB VRAM):
+ *   lo = 0x2000..0x6FFF  (foreground tile graphics)
+ *   hi = 0x7000..0xBFFF  (distant cityscape tiles + tilemaps)
+ * OBJ/sprite char (>= 0xC000) is intentionally excluded. */
+static uint32_t s_loadin_bg_lo = 0;
+static uint32_t s_loadin_bg_hi = 0;
+#define LOADIN_RING 2048
+static struct {
+    int frame;
+    uint32_t bg_lo, bg_hi;
+    uint8_t gm, sub, inidisp;
+    uint16_t vs1, vs2, dma_tail;
+} s_loadin[LOADIN_RING];
+static uint64_t s_loadin_idx = 0;
+
 void debug_server_on_vram_write(uint32_t byte_addr, uint8_t value) {
+    {
+        uint16_t ba = (uint16_t)(byte_addr & 0xFFFF);
+        if (ba >= 0x2000 && ba <= 0x6FFF) s_loadin_bg_lo++;
+        else if (ba >= 0x7000 && ba <= 0xBFFF) s_loadin_bg_hi++;
+    }
     if (!s_vram_trace.active || !s_vram_trace.log) return;
     uint16_t adr_b = (uint16_t)(byte_addr & 0xFFFF);
     int hit = 0;
@@ -340,6 +363,27 @@ void debug_server_on_vram_write(uint32_t byte_addr, uint8_t value) {
         e->stack[s] = g_recomp_stack[g_recomp_stack_top - depth + s];
     s_vram_trace.write_idx++;
     if (s_vram_trace.count < s_vram_trace.capacity) s_vram_trace.count++;
+}
+
+/* Called once per frame (from MmxRunOneFrameOfGame) AFTER the frame's game
+ * logic + NMI. Snapshots the per-frame BG-write counts (then resets them)
+ * plus game-mode / scroll / brightness / DMA-queue-tail into a ring, so a
+ * probe can read the full multi-second stage-load window with no eviction
+ * or oldest-first truncation (the generic rings can't span it). */
+void debug_server_loadin_tick(void) {
+    int slot = (int)(s_loadin_idx & (LOADIN_RING - 1));
+    s_loadin[slot].frame   = snes_frame_counter;
+    s_loadin[slot].bg_lo   = s_loadin_bg_lo;
+    s_loadin[slot].bg_hi   = s_loadin_bg_hi;
+    s_loadin[slot].gm      = s_ram ? s_ram[0x0100] : 0;
+    s_loadin[slot].sub     = s_ram ? s_ram[0x0101] : 0;
+    s_loadin[slot].inidisp = g_ppu ? g_ppu->inidisp : 0;
+    s_loadin[slot].vs1     = g_ppu ? (uint16_t)g_ppu->vScroll[0] : 0;
+    s_loadin[slot].vs2     = g_ppu ? (uint16_t)g_ppu->vScroll[1] : 0;
+    s_loadin[slot].dma_tail = s_ram ? (uint16_t)(s_ram[0x00A5] | (s_ram[0x00A6] << 8)) : 0;
+    s_loadin_idx++;
+    s_loadin_bg_lo = 0;
+    s_loadin_bg_hi = 0;
 }
 
 // ---- Oracle-side VRAM byte-write trace ----
@@ -6184,6 +6228,36 @@ static void cmd_get_rtstrace(const char *args) {
     send_line(buf);
 }
 
+/* loadin_get [count] — dump the last `count` per-frame stage-load records
+ * (oldest-first within the window). Default 400, max = ring size. */
+static void cmd_loadin_get(const char *args) {
+    int count = 400;
+    if (args && *args) sscanf(args, "%d", &count);
+    if (count > LOADIN_RING) count = LOADIN_RING;
+    if (count < 1) count = 1;
+    uint64_t have = s_loadin_idx < (uint64_t)LOADIN_RING ? s_loadin_idx : (uint64_t)LOADIN_RING;
+    if ((uint64_t)count > have) count = (int)have;
+    static char buf[262144];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"total\":%llu,\"count\":%d,\"rows\":[",
+        (unsigned long long)s_loadin_idx, count);
+    uint64_t start = s_loadin_idx - (uint64_t)count;
+    int budget = (int)sizeof(buf) - 256;
+    for (int i = 0; i < count && pos < budget; i++) {
+        int slot = (int)((start + (uint64_t)i) & (LOADIN_RING - 1));
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"f\":%d,\"bg_lo\":%u,\"bg_hi\":%u,\"gm\":\"0x%02x\","
+            "\"sub\":\"0x%02x\",\"ini\":\"0x%02x\",\"vs1\":%u,\"vs2\":%u,"
+            "\"tail\":\"0x%04x\"}",
+            i ? "," : "", s_loadin[slot].frame, s_loadin[slot].bg_lo,
+            s_loadin[slot].bg_hi, s_loadin[slot].gm, s_loadin[slot].sub,
+            s_loadin[slot].inidisp, s_loadin[slot].vs1, s_loadin[slot].vs2,
+            s_loadin[slot].dma_tail);
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+}
+
 typedef struct { const char *name; void (*handler)(const char *args); } CmdEntry;
 static const CmdEntry s_commands[] = {
     {"ping",          cmd_ping},
@@ -6285,6 +6359,7 @@ static const CmdEntry s_commands[] = {
     {"get_oracle_vram_trace", cmd_get_oracle_vram_trace},
     {"vram_write_diff", cmd_vram_write_diff},
     {"last_vram_write_to", cmd_last_vram_write_to},
+    {"loadin_get",    cmd_loadin_get},
 #if SNESRECOMP_REVERSE_DEBUG
     {"trace_wram",        cmd_trace_wram},
     {"trace_wram_reset",  cmd_trace_wram_reset},
