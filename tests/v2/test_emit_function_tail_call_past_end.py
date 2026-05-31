@@ -4,7 +4,13 @@ When a function A has cfg `end:<pc>` AND a goto-or-fall-through edge
 crosses that boundary into a target PC that resolves to a known
 function entry in `codegen._NAME_RESOLVER`, emit a tail call:
 
-    { RecompReturn _tc = B_M{m}X{x}(cpu); RecompStackPop(); return _tc; }
+    {
+      cpu->host_return_valid = _hrv;
+      cpu_tailcall_inherit_return_context(_entry_s, _hrv);
+      RecompReturn _tc = B_M{m}X{x}(cpu);
+      RecompStackPop();
+      return _tc;
+    }
 
 instead of `cpu_trace_unresolved_goto_trap(...)` (the prior emit). The
 asm idiom (a function legitimately falls through into its declared
@@ -59,6 +65,7 @@ def test_fallthrough_past_end_into_named_sibling_emits_tail_call():
     # Tail-call to the sibling, with the boundary's (m, x) variant.
     assert 'IntroInitContinue_M1X1(cpu)' in src, src
     assert 'tail-call past end:' in src, src
+    assert 'cpu_tailcall_inherit_return_context(_entry_s, _hrv);' in src, src
     # Must NOT emit the unresolved-goto trap for that boundary.
     assert 'cpu_trace_unresolved_goto_trap' not in src, src
 
@@ -89,6 +96,7 @@ def test_fallthrough_past_end_records_call_demand_for_variant():
     # that, NOT (1, 1).
     assert ((0x00 << 16) | 0x8003, 0, 0) in demand, demand
     assert 'NextSibling_M0X0(cpu)' in src, src
+    assert 'cpu_tailcall_inherit_return_context(_entry_s, _hrv);' in src, src
 
 
 def test_jump_past_end_into_sibling_emits_tail_call_not_inline_import():
@@ -137,6 +145,7 @@ def test_jump_past_end_into_sibling_emits_tail_call_not_inline_import():
         f'expected NO inline-import with gate, got:\n{src_tail}'
     assert 'B_M1X1(cpu)' in src_tail, src_tail
     assert 'tail-call past end:' in src_tail, src_tail
+    assert 'cpu_tailcall_inherit_return_context(_entry_s, _hrv);' in src_tail, src_tail
 
 
 def test_unknown_target_still_traps():
@@ -159,3 +168,54 @@ def test_unknown_target_still_traps():
     assert 'cpu_trace_unresolved_goto_trap' in src, src
     # No phantom tail-call code path.
     assert 'tail-call past end:' not in src, src
+
+
+def test_tail_called_shared_epilogue_consumes_inherited_return_context():
+    """A split shared suffix may pop stack bytes pushed by the entry body.
+    The tail callee must inherit the caller's _entry_s/_hrv instead of
+    recording a new baseline after the tail transfer."""
+    rom = make_lorom_bank0({
+        # A: PHB; PHK; PLB; falls through into B at end:$8003.
+        0x8000: bytes([0x8B, 0x4B, 0xAB]),
+        # B: PLB; RTL. The PLB balances A's PHB.
+        0x8003: bytes([0xAB, 0x6B]),
+    })
+    name_map = {
+        (0x00 << 16) | 0x8003: 'SharedEpilogue',
+    }
+    with _with_name_resolver(name_map):
+        src_a = emit_function(rom, bank=0, start=0x8000,
+                              entry_m=1, entry_x=1,
+                              end=0x8003,
+                              func_name='EntryWithBankSetup',
+                              sibling_entry_pcs={0x8003})
+        src_b = emit_function(rom, bank=0, start=0x8003,
+                              entry_m=1, entry_x=1,
+                              end=0x8005,
+                              func_name='SharedEpilogue',
+                              sibling_entry_pcs={0x8000})
+
+    assert 'SharedEpilogue_M1X1(cpu)' in src_a, src_a
+    assert 'cpu_tailcall_inherit_return_context(_entry_s, _hrv);' in src_a, src_a
+    assert 'cpu_take_tailcall_return_context(&_entry_s, &_hrv)' in src_b, src_b
+
+
+def test_cross_bank_tail_call_keeps_positional_nlr_argument_out_of_prefix():
+    """Cross-bank JML tail-call sites pass the NLR info as the third
+    positional argument. That must not become text before the opening brace."""
+    rom = make_lorom_bank0({
+        # JML $01:8000
+        0x8000: bytes([0x5C, 0x00, 0x80, 0x01]),
+    })
+    name_map = {
+        (0x01 << 16) | 0x8000: 'CrossBankTail',
+    }
+    with _with_name_resolver(name_map):
+        src = emit_function(rom, bank=0, start=0x8000,
+                            entry_m=1, entry_x=1,
+                            end=0x8004,
+                            func_name='Caller')
+
+    assert 'None{' not in src, src
+    assert 'CrossBankTail_M1X1(cpu)' in src, src
+    assert 'cpu_tailcall_inherit_return_context(_entry_s, _hrv);' in src, src

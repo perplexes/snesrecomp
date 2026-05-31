@@ -171,8 +171,17 @@ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
   }
   switch(adr) {
     case 0x80: {
+#if SNESRECOMP_REVERSE_DEBUG
+      { extern void debug_on_wram_write_byte(uint32_t, uint8_t, uint8_t);
+        uint32_t wa = snes->ramAdr & 0x1ffffu;
+        uint8_t old = snes->ram[wa];
+        snes->ram[wa] = val;
+        debug_on_wram_write_byte(wa, old, val);
+        snes->ramAdr = (wa + 1u) & 0x1ffffu; }
+#else
       snes->ram[snes->ramAdr++] = val;
       snes->ramAdr &= 0x1ffff;
+#endif
       break;
     }
     case 0x81: {
@@ -395,11 +404,25 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
   adr &= 0xffff;
   if(bank == 0x7e || bank == 0x7f) {
     uint32_t addr = ((bank & 1) << 16) | adr;
+#if SNESRECOMP_REVERSE_DEBUG
+    { extern void debug_on_wram_write_byte(uint32_t, uint8_t, uint8_t);
+      uint8_t old = snes->ram[addr];
+      snes->ram[addr] = val;
+      debug_on_wram_write_byte(addr, old, val); }
+#else
     snes->ram[addr] = val; // ram
+#endif
   }
   if(bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) {
     if(adr < 0x2000) {
+#if SNESRECOMP_REVERSE_DEBUG
+      { extern void debug_on_wram_write_byte(uint32_t, uint8_t, uint8_t);
+        uint8_t old = snes->ram[adr];
+        snes->ram[adr] = val;
+        debug_on_wram_write_byte((uint32_t)adr, old, val); }
+#else
       snes->ram[adr] = val; // ram mirror
+#endif
     }
     if(adr >= 0x2100 && adr < 0x2200) {
       snes_writeBBus(snes, adr & 0xff, val); // B-bus

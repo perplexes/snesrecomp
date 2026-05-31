@@ -372,7 +372,8 @@ def load_bank_cfg(path: str) -> BankCfg:
                 })
                 continue
 
-            # func <name> <hex_pc> [end:<hex_end>] [tail_call:<hex>] [exit_mx:M,X] [sig:...] [...]
+            # func <name> <hex_pc> [end:<hex_end>] [tail_call:<hex>] [exit_mx:M,X]
+            #                      [entry_s_offset:<n>] [sig:...] [...]
             if head == 'func':
                 if len(tokens) < 3:
                     continue
@@ -381,6 +382,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 end: Optional[int] = None
                 tail_call_pc16: Optional[int] = None
                 exit_mx: Optional[Tuple[int, int]] = None
+                entry_s_offset_val: int = 0
                 for t in tokens[3:]:
                     if t.startswith('end:'):
                         try:
@@ -421,9 +423,15 @@ def load_bank_cfg(path: str) -> BankCfg:
                                            int(parts[1]) & 1)
                         except (ValueError, IndexError):
                             pass
+                    elif t.startswith('entry_s_offset:'):
+                        try:
+                            entry_s_offset_val = int(t[len('entry_s_offset:'):])
+                        except ValueError:
+                            pass
                 be = BankEntry(
                     name=name, start=start, end=end,
-                    tail_call_pc16=tail_call_pc16)
+                    tail_call_pc16=tail_call_pc16,
+                    entry_s_offset=entry_s_offset_val)
                 # Non-default attribute on BankEntry; assign post-init.
                 if exit_mx is not None:
                     be.exit_mx = exit_mx

@@ -48,7 +48,7 @@ from v2.decoder import (  # noqa: E402
     classify_dispatch_helper, decode_function, analyze_function_exit_mx,
     set_decode_cache_enabled, clear_decode_cache, decode_cache_stats,
 )
-from v2.emit_bank import emit_bank  # noqa: E402
+from v2.emit_bank import BankEntry, emit_bank  # noqa: E402
 from v2.wrapper_autoroute import detect_and_route as autoroute_wrappers, format_fix_summary  # noqa: E402
 from v2.tail_call_autoroute import (  # noqa: E402
     detect_and_route as autoroute_tail_calls,
@@ -88,6 +88,7 @@ _STUB_MARKERS = (
     'cpu_trace_unresolved_stub_trap',        # trap-fn call (unresolved_stubs_v2.c)
     'Goto with no successor',                # emit_function cross-bank-goto bail (2026-05-18)
     'unresolvable cross-bank goto',          # emit_function cross-bank trap fallback (2026-05-18)
+    'unresolved IndirectGoto',               # emit_function indirect JMP/JML with no resolution (2026-05-29)
 )
 
 
@@ -127,7 +128,7 @@ def _lint_stubs(out_dir: pathlib.Path,
     return hits
 
 
-def _scan_dirty_variants(results, parsed) -> set:
+def _scan_dirty_variants(results, parsed) -> tuple:
     """Emit-truth attribution: map each per-bank lint marker to the
     (addr24, m, x) variant whose emitted body contains it.
 
@@ -137,7 +138,12 @@ def _scan_dirty_variants(results, parsed) -> set:
     not per-variant bodies, so they never appear in these per-bank
     `src` blobs and are handled separately.
 
-    Returns a set of (addr24, entry_m, entry_x) keys.
+    Returns `(dirty, emitted)` — two sets of (addr24, entry_m, entry_x)
+    keys. `emitted` is every variant body seen (clean OR dirty) whose
+    base name resolves to a known entry; the prune uses it to find a
+    clean SIBLING for auto-promoted functions that have no cfg-declared
+    canonical width (canonical_variants is empty for them, so the
+    canonical-sibling test can never fire).
     """
     base_start: dict = {}  # (bank, base_name) -> start pc16
     for bank, _p, cfg in parsed:
@@ -147,6 +153,7 @@ def _scan_dirty_variants(results, parsed) -> set:
     defre = re.compile(
         r'^RecompReturn\s+([A-Za-z0-9_]+)_M([01])X([01])\(CpuState')
     dirty: set = set()
+    emitted: set = set()
     for r in results:
         if r.get('status') != 'ok':
             continue
@@ -159,6 +166,8 @@ def _scan_dirty_variants(results, parsed) -> set:
                 cur = (None if start is None else
                        ((bank << 16) | start, int(mm.group(2)),
                         int(mm.group(3))))
+                if cur is not None:
+                    emitted.add(cur)
                 continue
             if cur is None:
                 continue
@@ -166,7 +175,411 @@ def _scan_dirty_variants(results, parsed) -> set:
                 if mk in line:
                     dirty.add(cur)
                     break
-    return dirty
+    return dirty, emitted
+
+
+def _compute_prunable(dirty_variants: set, emitted_variants: set,
+                      canonical_variants: dict) -> set:
+    """Decide which dirty (addr24, m, x) variants the emit-truth prune
+    may drop, given the cumulative dirty + emitted variant sets and the
+    cfg-declared canonical widths.
+
+    A dirty variant is prunable when it is provably a wrong-width clone
+    that is never validly reached:
+
+    - It is NOT the (effective) canonical (the un-suffixed alias binds to
+      the canonical, so canonicals are never dropped — even when dirty).
+    - Its effective-canonical width is EMITTED and CLEAN — the canonical
+      proves the bytes are real code at that width, so the dirty clone is
+      a wrong-width decode (misaligned operands -> phantom branches /
+      garbage calls) that can never be validly reached.
+
+    Effective canonical = the cfg-declared width(s) when the base has a
+    cfg entry, else the default 65816 reset width (1, 1). Auto-promoted
+    synthetic `bank_XX_YYYY` targets (demanded by an auto-recovered
+    JSR/JMP (abs,X) table, no cfg entry) get the (1, 1) default — the
+    SAME default a bare `func` directive gets — so their wrong-width
+    clones prune the same way cfg-named functions' do. This is sound for
+    genuine RAM/computed-dispatch sites: when the genuine dispatch lives
+    at the (1, 1) entry width, that canonical is itself dirty, the
+    clean-canonical test fails, and NOTHING is pruned — the genuine site
+    survives as loud trap residue (matching the oracle baseline) for cfg
+    `indirect_dispatch` / `hle_dispatch` follow-up.
+    """
+    dirty_mx: dict = {}
+    for (addr, em, ex) in dirty_variants:
+        dirty_mx.setdefault(addr, set()).add((em, ex))
+    emitted_mx: dict = {}
+    for (addr, em, ex) in emitted_variants:
+        emitted_mx.setdefault(addr, set()).add((em, ex))
+    prunable: set = set()
+    for (addr, em, ex) in dirty_variants:
+        canon = canonical_variants.get(addr) or {(1, 1)}
+        if (em, ex) in canon:
+            continue  # never prune the (effective) canonical variant
+        # Require a clean canonical sibling that was actually emitted:
+        # the canonical proves real code at its width, so this dirty
+        # non-canonical clone is the wrong-width garbage.
+        clean_canon = any(
+            (c in emitted_mx.get(addr, set()))
+            and (c not in dirty_mx.get(addr, set()))
+            for c in canon)
+        if clean_canon:
+            prunable.add((addr, em, ex))
+    return prunable
+
+
+# Matches a function-variant CALL in an emitted body: `Name_MmXx(cpu)`.
+# The def line is `Name_MmXx(CpuState *cpu)` so the literal `(cpu)` tail
+# keeps defs from matching. Intra-function labels are `goto L_..._MmXx;`
+# (no `(cpu)`) and carry no cross-variant link dependency.
+_VARIANT_CALL_RE = re.compile(r'([A-Za-z_]\w*)_M([01])X([01])\(cpu\)')
+_SYNTHETIC_NAME_RE = re.compile(r'^bank_([0-9A-Fa-f]{2})_([0-9A-Fa-f]{4})$')
+# The runtime-(m,x) dispatch switch — `switch (((cpu->m_flag & 1) << 1)
+# | (cpu->x_flag & 1)) { case 0: _r = Foo_M0X0(cpu); ... }` — references
+# ALL FOUR widths of its callee and drops invalid-width cases via
+# valid_variants (a switch case never dangles). Only DIRECT references
+# (tail-calls / resolved single calls, emitted at the caller's own
+# inherited width) can dangle, so the reference-taint graph must EXCLUDE
+# these `case 0..3:` / `default:` dispatch lines — counting them taints
+# every caller of any wrong-width clone and cascades through the whole
+# call graph (observed: ~half of all variants tainted).
+_MX_DISPATCH_CASE_RE = re.compile(r'^\s*(case\s+[0-3]\s*:|default\s*:)')
+
+
+def _scan_variant_refs(results, parsed) -> dict:
+    """Build the DIRECT cross-variant reference graph from the emitted
+    bodies.
+
+    Returns `{(addr24, m, x): set((taddr24, tm, tx), ...)}` — the
+    function-variant CALLs each body makes by a DIRECT reference
+    (tail-call / resolved single call at the caller's own inherited
+    width). Runtime-(m,x) switch cases are excluded (see
+    `_MX_DISPATCH_CASE_RE`): they reference every width and would
+    cascade taint across the whole call graph, yet never dangle (the
+    invalid-width case is dropped by valid_variants).
+
+    Used by the reference-taint prune: a wrong-width caller clone names
+    its DIRECT successor at its own (wrong) inherited width; when that
+    successor variant was never emitted / pruned, the reference dangles
+    (LNK2019), so the caller clone is itself wrong-width and must be
+    pruned. Names resolve via cfg `name` directives; synthetic
+    `bank_BB_AAAA` targets encode the address. Unresolvable names are
+    skipped (conservative: never over-taint)."""
+    name_to_addr: dict = {}
+    base_start: dict = {}
+    for bank, _p, cfg in parsed:
+        for e in cfg.entries:
+            if e.name:
+                name_to_addr[e.name] = (bank << 16) | (e.start & 0xFFFF)
+            bn = e.name or f"bank_{bank:02X}_{e.start & 0xFFFF:04X}"
+            base_start[(bank, bn)] = e.start & 0xFFFF
+
+    def _resolve(nm: str):
+        m = _SYNTHETIC_NAME_RE.match(nm)
+        if m:
+            return (int(m.group(1), 16) << 16) | int(m.group(2), 16)
+        return name_to_addr.get(nm)
+
+    defre = re.compile(
+        r'^RecompReturn\s+([A-Za-z0-9_]+)_M([01])X([01])\(CpuState')
+    refs: dict = {}
+    for r in results:
+        if r.get('status') != 'ok':
+            continue
+        bank = r['bank']
+        cur = None
+        for line in r['src'].split('\n'):
+            mm = defre.match(line)
+            if mm:
+                start = base_start.get((bank, mm.group(1)))
+                cur = (None if start is None else
+                       ((bank << 16) | start, int(mm.group(2)),
+                        int(mm.group(3))))
+                continue
+            if cur is None:
+                continue
+            if _MX_DISPATCH_CASE_RE.match(line):
+                continue  # runtime-(m,x) switch case — not a direct ref
+            for cm in _VARIANT_CALL_RE.finditer(line):
+                taddr = _resolve(cm.group(1))
+                if taddr is None:
+                    continue
+                tv = (taddr, int(cm.group(2)), int(cm.group(3)))
+                if tv == cur:
+                    continue  # self-reference (recursion) is not a taint
+                refs.setdefault(cur, set()).add(tv)
+    return refs
+
+
+def _propagate_reference_taint(dirty: set, refs: dict, emitted: set,
+                               bank_set: set, pruned: set) -> set:
+    """Fixpoint-taint wrong-width caller clones for the reference-taint
+    prune. Seed = the emit-truth dirty set (own-body marker). A variant
+    V then becomes tainted when it CALLs a target variant T that is:
+
+    - in an in-cfg-set bank yet NOT currently emitted (emitted - pruned)
+      -> a guaranteed dangling link reference: T was pruned as a dirty
+      wrong-width clone, or was never emitted at that inherited width; or
+    - itself tainted -> the wrong-width decode chains deeper.
+
+    Out-of-cfg-set targets are skipped (they get loud
+    cpu_trace_unresolved_stub_trap bodies in unresolved_stubs_v2.c, so
+    they never dangle). The clean-canonical guard in `_compute_prunable`
+    then drops only the NON-canonical tainted clones whose canonical
+    width is clean — so a genuine multi-width caller is never pruned
+    (its canonical-width successors resolve to emitted variants and the
+    canonical itself stays untainted)."""
+    tainted = set(dirty)
+    emitted_now = emitted - pruned
+    changed = True
+    while changed:
+        changed = False
+        for v, targets in refs.items():
+            if v in tainted:
+                continue
+            for (taddr, tm, tx) in targets:
+                tbank = (taddr >> 16) & 0xFF
+                dangling = (tbank in bank_set
+                            and (taddr, tm, tx) not in emitted_now)
+                if dangling or (taddr, tm, tx) in tainted:
+                    tainted.add(v)
+                    changed = True
+                    break
+    return tainted
+
+
+def _apply_variant_prune(parsed, cumulative_pruned: set) -> dict:
+    """Drop every pruned (addr24, m, x) variant's cfg entry and rebuild
+    the survivor valid-variants map fed to codegen (also pushed via
+    set_valid_variants so the runtime-(m,x) switch stops emitting the
+    pruned case). Returns the new valid_variants_map. Idempotent: safe
+    to call repeatedly as cumulative_pruned grows."""
+    prune_by_bank: dict = {}
+    for (addr, em, ex) in cumulative_pruned:
+        prune_by_bank.setdefault((addr >> 16) & 0xFF, set()).add(
+            (addr & 0xFFFF, em, ex))
+    for bank2, _p2, cfg2 in parsed:
+        pset = prune_by_bank.get(bank2)
+        if not pset:
+            continue
+        cfg2.entries = [
+            e for e in cfg2.entries
+            if (e.start & 0xFFFF, e.entry_m & 1, e.entry_x & 1)
+            not in pset]
+    vvm: dict = {}
+    for bank2, _p2, cfg2 in parsed:
+        for e in cfg2.entries:
+            a = (bank2 << 16) | (e.start & 0xFFFF)
+            vvm.setdefault(a, set()).add((e.entry_m & 1, e.entry_x & 1))
+    vvm = {a: frozenset(s) for a, s in vvm.items()}
+    set_valid_variants(vvm)
+    return vvm
+
+
+def _rebuild_callee_exit_mx(parsed, variants: dict) -> tuple:
+    """Build the decoder's callee exit-(m, x) lookup from cfg state.
+
+    `autoroute_exit_mx` writes per-variant routes back into each BankCfg,
+    while hand-authored `exit_mx_at` entries are broadcast to every
+    discovered entry variant. Keep this in one place so initial setup and
+    post-auto-promote refreshes cannot drift.
+    """
+    callee_exit_mx: dict = {}
+    cfg_exit_mx_count = 0
+    declared_exit_mx: dict = {}
+
+    for _bank, _cfg_path, cfg in parsed:
+        for (b_id, addr16, m_val, x_val) in cfg.exit_mx_at:
+            declared_exit_mx[(b_id & 0xFF, addr16 & 0xFFFF)] = (
+                m_val, x_val)
+
+    for (b_id, addr16), (ex_m, ex_xf) in declared_exit_mx.items():
+        target_pc24 = (b_id << 16) | addr16
+        mx_set = variants.get(target_pc24)
+        if mx_set:
+            for em, ex2 in mx_set:
+                callee_exit_mx[(target_pc24, em, ex2)] = (ex_m, ex_xf)
+                cfg_exit_mx_count += 1
+        else:
+            # No discovered variants yet: preserve the historical cfg
+            # default so early decode still gets the annotation.
+            callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
+            cfg_exit_mx_count += 1
+
+    per_variant_count = 0
+    for _bank, _cfg_path, cfg in parsed:
+        for (b_id, addr16, em_in, ex_in, ex_m, ex_xf) in \
+                cfg.exit_mx_at_per_variant:
+            target_pc24 = ((b_id & 0xFF) << 16) | (addr16 & 0xFFFF)
+            callee_exit_mx[(target_pc24, em_in & 1, ex_in & 1)] = (
+                ex_m & 1, ex_xf & 1)
+            per_variant_count += 1
+
+    return (
+        callee_exit_mx,
+        cfg_exit_mx_count,
+        len(declared_exit_mx),
+        per_variant_count,
+    )
+
+
+def _discover_variants_from_current_entries(parsed, rom: bytes, variants: dict,
+                                            decoded: set, dispatch_helpers,
+                                            all_data_regions=None,
+                                            pruned_variants=None,
+                                            pending_entries=None,
+                                            callee_exit_mx=None,
+                                            callee_exit_mx_modes=None,
+                                            ) -> int:
+    """Extend variant discovery after auto-promotion has added entries.
+
+    The initial variant-discovery pass can see calls *to* synthetic
+    targets, but cannot scan calls *inside* those targets until the
+    auto-promote loop has created BankEntry records for them.
+
+    The same refresh is also needed after exit-(M, X) autorouting learns
+    that a callee returns with different status widths. A call site after
+    such a JSR/JSL may demand a different target variant than the
+    pre-autoroute decode discovered. If that target variant is missing,
+    later valid-variant maps can suppress a live runtime mode and the
+    generated switch falls through to its default no-op case.
+
+    Mutates ``variants`` / ``decoded`` and appends missing BankEntry
+    clones for already-known function addresses.  Returns the number of
+    entries appended.
+    """
+    pruned_variants = pruned_variants or set()
+
+    addr_to_end: dict[int, "Optional[int]"] = {}
+    addr_to_bank: dict[int, int] = {}
+    entries_by_addr: dict[int, object] = {}
+    for bank, _cfg_path, cfg in parsed:
+        for entry in cfg.entries:
+            addr = (bank << 16) | (entry.start & 0xFFFF)
+            addr_to_end.setdefault(addr, entry.end)
+            addr_to_bank.setdefault(addr, bank)
+            entries_by_addr.setdefault(addr, entry)
+
+    def _in_data_region(target: int) -> bool:
+        if not all_data_regions:
+            return False
+        tbank = (target >> 16) & 0xFF
+        tpc = target & 0xFFFF
+        return any(
+            (b & 0xFF) == tbank and
+            (s & 0xFFFF) <= tpc < (e & 0xFFFF)
+            for (b, s, e) in all_data_regions)
+
+    queue: list[tuple[int, int, int, int, "Optional[int]"]] = []
+    if pending_entries is None:
+        seed = {
+            ((bank << 16) | (entry.start & 0xFFFF),
+             entry.entry_m & 1, entry.entry_x & 1)
+            for bank, _cfg_path, cfg in parsed
+            for entry in cfg.entries
+        }
+    else:
+        seed = set(pending_entries)
+
+    for addr, em, ex in sorted(seed):
+        if (addr, em, ex) in pruned_variants or addr not in addr_to_end:
+            continue
+        variants.setdefault(addr, set()).add((em, ex))
+        if (addr, em, ex) not in decoded:
+            bank = addr_to_bank[addr]
+            entry = entries_by_addr[addr]
+            queue.append((bank, entry.start, em, ex, addr_to_end.get(addr)))
+
+    while queue:
+        bank, start, em, ex, end = queue.pop()
+        addr = (bank << 16) | (start & 0xFFFF)
+        if (addr, em, ex) in decoded or (addr, em, ex) in pruned_variants:
+            continue
+        decoded.add((addr, em, ex))
+        try:
+            graph = decode_function(rom, bank, start,
+                                    entry_m=em, entry_x=ex,
+                                    end=end,
+                                    dispatch_helpers=dispatch_helpers,
+                                    data_regions=all_data_regions or None,
+                                    callee_exit_mx=callee_exit_mx,
+                                    callee_exit_mx_modes=callee_exit_mx_modes)
+        except Exception:
+            continue
+        for di in graph.insns.values():
+            ins = di.insn
+            if ins.mnem == 'JSR' and ins.length == 3:
+                src_bank = (ins.addr >> 16) & 0xFF
+                target = ((src_bank << 16) | (ins.operand & 0xFFFF))
+            elif ins.mnem == 'JSL':
+                target = ins.operand & 0xFFFFFF
+            elif ins.mnem == 'JMP' and ins.length == 4:
+                target = ins.operand & 0xFFFFFF
+            else:
+                target = None
+            if target is not None and _in_data_region(target):
+                target = None
+            if target is not None:
+                em2 = ins.m_flag & 1
+                ex2 = ins.x_flag & 1
+                if (target, em2, ex2) not in pruned_variants:
+                    if (em2, ex2) not in variants.setdefault(target, set()):
+                        variants[target].add((em2, ex2))
+                    if target in addr_to_end and (target, em2, ex2) not in decoded:
+                        tb = addr_to_bank[target]
+                        ts = target & 0xFFFF
+                        queue.append((tb, ts, em2, ex2, addr_to_end[target]))
+            for d_target in getattr(ins, 'dispatch_entries', None) or []:
+                if d_target == 0:
+                    continue
+                if getattr(ins, 'dispatch_kind', 'short') == 'long':
+                    d_addr = d_target & 0xFFFFFF
+                else:
+                    d_addr = ((ins.addr >> 16) & 0xFF) << 16 | (
+                        d_target & 0xFFFF)
+                if _in_data_region(d_addr):
+                    continue
+                em2 = ins.m_flag & 1
+                ex2 = ins.x_flag & 1
+                if (d_addr, em2, ex2) in pruned_variants:
+                    continue
+                if (em2, ex2) not in variants.setdefault(d_addr, set()):
+                    variants[d_addr].add((em2, ex2))
+                if d_addr in addr_to_end and (d_addr, em2, ex2) not in decoded:
+                    tb = addr_to_bank[d_addr]
+                    ts = d_addr & 0xFFFF
+                    queue.append((tb, ts, em2, ex2, addr_to_end[d_addr]))
+
+    added = 0
+    for bank, _cfg_path, cfg in parsed:
+        current_keys = {
+            ((bank << 16) | (e.start & 0xFFFF), e.entry_m & 1, e.entry_x & 1)
+            for e in cfg.entries
+        }
+        by_pc: dict[int, object] = {}
+        for e in cfg.entries:
+            by_pc.setdefault(e.start & 0xFFFF, e)
+        for addr, mxs in sorted(variants.items()):
+            if ((addr >> 16) & 0xFF) != bank:
+                continue
+            base = by_pc.get(addr & 0xFFFF)
+            if base is None:
+                continue
+            for em, ex in sorted(mxs):
+                key = (addr, em, ex)
+                if key in current_keys or key in pruned_variants:
+                    continue
+                cfg.entries.append(BankEntry(
+                    name=base.name,
+                    start=base.start,
+                    end=base.end,
+                    entry_m=em,
+                    entry_x=ex,
+                ))
+                current_keys.add(key)
+                added += 1
+    return added
 
 
 def _emit_bank_one(args_dict: dict) -> dict:
@@ -873,6 +1286,37 @@ def main() -> int:
     _phase("callee_exit_mx_modes_initial")
     callee_exit_mx_modes = _build_callee_exit_mx_modes(callee_exit_mx)
 
+    # Variant discovery originally runs before exit-M/X autoroute can be
+    # applied to post-JSR/JSL fall-through decoding. Re-scan with the
+    # learned exit map so call sites after a mutating callee contribute
+    # their real runtime entry widths to downstream callees.
+    exit_variant_total = 0
+    for exit_variant_round in range(16):
+        exit_variant_added = _discover_variants_from_current_entries(
+            parsed, rom, variants, set(), dispatch_helpers,
+            all_data_regions=all_data_regions or None,
+            pruned_variants=set(),
+            callee_exit_mx=callee_exit_mx,
+            callee_exit_mx_modes=callee_exit_mx_modes)
+        if not exit_variant_added:
+            break
+        exit_variant_total += exit_variant_added
+        for _bank2, _cfg_path2, cfg2 in parsed:
+            cfg2.exit_mx_at_per_variant.clear()
+        exit_mx_fixes = autoroute_exit_mx(
+            parsed, rom, dispatch_helpers=dispatch_helpers)
+        callee_exit_mx, _cfg_exit_count, _decl_exit_count, \
+            _per_variant_count = _rebuild_callee_exit_mx(parsed, variants)
+        callee_exit_mx_modes = _build_callee_exit_mx_modes(callee_exit_mx)
+        print(f"  exit-mx variant refresh {exit_variant_round + 1}: "
+              f"added {exit_variant_added} entry variant(s); "
+              f"refreshed {len(exit_mx_fixes)} exit-mx routes")
+    else:
+        print("  WARNING: exit-mx variant refresh hit 16 rounds")
+    if exit_variant_total:
+        print(f"  exit-mx variant refresh: added {exit_variant_total} "
+              f"entry variant(s) total")
+
     total = len(parsed)
     succeeded = 0
     failed = []
@@ -890,11 +1334,11 @@ def main() -> int:
     # post-emit, then re-emits affected banks.
     from v2.emit_bank import BankEntry  # local import again (already done above; harmless)
 
-    def _autopromote_targets(parsed_repo, demands: set, *, source_kind: str) -> int:
+    def _autopromote_targets(parsed_repo, demands: set, *, source_kind: str) -> set:
         """Add BankEntry records for any (addr, m, x) demand tuple not
         already represented in the bank's cfg. Shared between Call-target
-        and Goto-target auto-promotion. Returns the count of newly-added
-        entries.
+        and Goto-target auto-promotion. Returns the newly-added
+        (addr24, m, x) entries.
 
         `source_kind` is "call" or "goto" — only used for logging context;
         promotion logic is identical (same bucket-and-merge shape).
@@ -926,7 +1370,7 @@ def main() -> int:
                 continue
             by_bank.setdefault(tbank, []).append((tpc, em, ex))
         bank_index = {b: cfg for (b, _p, cfg) in parsed_repo}
-        added_local = 0
+        added_local: set = set()
         for bank, items in by_bank.items():
             cfg = bank_index.get(bank)
             if cfg is None:
@@ -965,7 +1409,7 @@ def main() -> int:
                     cfg.entries.append(new_entry)
                     entries_by_pc[pc] = new_entry
                 existing_keys.add(key)
-                added_local += 1
+                added_local.add(((bank << 16) | (pc & 0xFFFF), em, ex))
         return added_local
 
     # Bumped 2026-05-03: with the new callee-exit-(m,x) propagation,
@@ -973,6 +1417,8 @@ def main() -> int:
     # leaves ~239 unresolved externals; 24 converges in practice.
     max_passes = 24
     last_unresolved: set = set()
+    pending_variant_entries: set = set()
+    exit_mx_rescan_all = False
 
     # A2: parallel emit Pool — None when --jobs <= 1 (sequential, in-
     # process call to _emit_bank_one). Pool persists across passes so
@@ -1001,7 +1447,12 @@ def main() -> int:
     # converges alongside auto-promote.
     valid_variants_map: dict = {}
     cumulative_dirty_variants: set = set()
+    cumulative_emitted_variants: set = set()
     cumulative_pruned: set = set()
+    # In-cfg-set banks: the reference-taint prune only treats a missing
+    # callee variant as a dangling reference when its bank is in the cfg
+    # set (out-of-set targets get loud stub bodies, never dangle).
+    bank_set = {b for (b, _p, _c) in parsed}
 
     for pass_idx in range(max_passes):
         _phase(f"emit_pass_{pass_idx}")
@@ -1027,6 +1478,29 @@ def main() -> int:
         # Aggregate unresolved indirect JMP/JML/JSR sites. Hard-fail
         # gate: any entry here means a stub would otherwise be emitted.
         all_unresolved_indirects: list = []
+        # Auto-promoted targets materialize after the initial
+        # variant-discovery pass.  Decode any current entries that have
+        # not yet fed discovery, then clone newly demanded variants for
+        # known callees before this pass emits runtime dispatch switches.
+        variant_added = 0
+        if pending_variant_entries or exit_mx_rescan_all:
+            seed_entries = None if exit_mx_rescan_all else pending_variant_entries
+            scan_decoded = set() if exit_mx_rescan_all else decoded
+            variant_added = _discover_variants_from_current_entries(
+                parsed, rom, variants, scan_decoded, dispatch_helpers,
+                all_data_regions=all_data_regions or None,
+                pruned_variants=cumulative_pruned,
+                pending_entries=seed_entries,
+                callee_exit_mx=callee_exit_mx,
+                callee_exit_mx_modes=callee_exit_mx_modes)
+            pending_variant_entries = set()
+            exit_mx_rescan_all = False
+        if variant_added:
+            if valid_variants_map:
+                valid_variants_map = _apply_variant_prune(
+                    parsed, cumulative_pruned)
+            print(f"  variant discovery refresh: added {variant_added} "
+                  f"entry variant(s) from current cfg entries")
         # Build per-bank work items. Banks outside the --banks filter
         # are skipped here; the work item dict carries everything
         # _emit_bank_one needs (no shared globals across workers).
@@ -1107,45 +1581,32 @@ def main() -> int:
         # entry (no body, no forward decl) and record the survivor set
         # so the runtime (m,x) dispatch switches stop referencing it.
         # Never prune a canonical (the alias binds to it). Bases whose
-        # canonical is itself dirty, or with no clean canonical, are
+        # canonical is itself dirty, or with no clean sibling, are
         # left intact and surface in the stub lint as genuine residue.
-        dirty_now = _scan_dirty_variants(results, parsed)
+        #
+        # AUTO-PROMOTED targets (synthetic `bank_XX_YYYY`, demanded by a
+        # JSR/JMP (abs,X) table the decoder auto-recovered) have NO cfg
+        # entry, so canonical_variants is empty for them and the
+        # canonical-sibling test below can never fire. They are the bulk
+        # of the wrong-width residue — a phantom JSR (abs,X) inside a
+        # wrong-width parent auto-recovers a garbage table and promotes
+        # garbage entry PCs, each of which then misdecodes at its own
+        # wrong widths. For these (canon == empty) prune a dirty variant
+        # whenever ANY clean sibling variant was emitted (clean at SOME
+        # width proves the bytes are real code there); the all-dirty
+        # genuine RAM/computed-dispatch sites have no clean sibling and
+        # correctly remain as loud trap residue.
+        dirty_now, emitted_now = _scan_dirty_variants(results, parsed)
         cumulative_dirty_variants |= dirty_now
-        dirty_mx_by_addr: dict = {}
-        for (addr, em, ex) in cumulative_dirty_variants:
-            dirty_mx_by_addr.setdefault(addr, set()).add((em, ex))
-        prunable: set = set()
-        for (addr, em, ex) in cumulative_dirty_variants:
-            canon = canonical_variants.get(addr, set())
-            if (em, ex) in canon:
-                continue  # never prune a cfg-declared canonical variant
-            # require a clean canonical sibling (declared width not dirty)
-            if any(c not in dirty_mx_by_addr.get(addr, set()) for c in canon):
-                prunable.add((addr, em, ex))
+        cumulative_emitted_variants |= emitted_now
+        prunable = _compute_prunable(
+            cumulative_dirty_variants, cumulative_emitted_variants,
+            canonical_variants)
         newly_pruned = prunable - cumulative_pruned
         if newly_pruned:
             cumulative_pruned |= newly_pruned
-            prune_by_bank: dict = {}
-            for (addr, em, ex) in cumulative_pruned:
-                prune_by_bank.setdefault((addr >> 16) & 0xFF, set()).add(
-                    (addr & 0xFFFF, em, ex))
-            for bank2, _p2, cfg2 in parsed:
-                pset = prune_by_bank.get(bank2)
-                if not pset:
-                    continue
-                cfg2.entries = [
-                    e for e in cfg2.entries
-                    if (e.start & 0xFFFF, e.entry_m & 1, e.entry_x & 1)
-                    not in pset]
-            valid_variants_map = {}
-            for bank2, _p2, cfg2 in parsed:
-                for e in cfg2.entries:
-                    a = (bank2 << 16) | (e.start & 0xFFFF)
-                    valid_variants_map.setdefault(a, set()).add(
-                        (e.entry_m & 1, e.entry_x & 1))
-            valid_variants_map = {a: frozenset(s)
-                                  for a, s in valid_variants_map.items()}
-            set_valid_variants(valid_variants_map)
+            valid_variants_map = _apply_variant_prune(
+                parsed, cumulative_pruned)
             print(f"  emit-truth prune: dropped {len(newly_pruned)} "
                   f"wrong-width variant(s) this pass "
                   f"({len(cumulative_pruned)} total); re-emitting")
@@ -1159,11 +1620,59 @@ def main() -> int:
                             | take_unresolved_call_targets()) - cumulative_pruned
         last_unresolved = unresolved_calls
 
-        added = _autopromote_targets(
-            parsed, unresolved_calls, source_kind="call") if unresolved_calls else 0
+        added_entries = (_autopromote_targets(
+            parsed, unresolved_calls, source_kind="call")
+            if unresolved_calls else set())
+        pending_variant_entries |= added_entries
+        added = len(added_entries)
 
-        if added == 0 and not newly_pruned:
-            break
+        if added == 0 and not newly_pruned and not variant_added:
+            # ── Reference-taint prune (convergence guard) ────────────
+            # Emit-truth prune + auto-promote have stabilized. The
+            # bf8a34b runtime-(m,x) policy still emits wrong-width CALLER
+            # clones; at the wrong width a clone's DIRECT successor
+            # (tail-call / resolved single call, emitted at the clone's
+            # own inherited width) names a callee variant that was never
+            # emitted at that width -> a dangling link reference
+            # (LNK2019). Such a clone is itself wrong-width and
+            # unreachable at runtime (the live (m,x) selects the
+            # canonical variant). Taint it via the DIRECT reference graph
+            # (4-way switch cases are excluded — they never dangle and
+            # would cascade taint across the whole call graph) and prune
+            # any whose canonical sibling is clean. The "currently
+            # emitted" set is THIS pass's `emitted_now`, NOT cumulative:
+            # a variant emitted in an early all-widths pass then dropped
+            # from valid_variants (without being pruned) is no longer on
+            # disk, so cumulative would mask the dangle. Computed only
+            # HERE, at convergence, so "not emitted" is stable (no callee
+            # is merely awaiting a later auto-promote pass). New prunes
+            # re-emit and may expose a further dangling layer; the loop
+            # iterates to a fixpoint (monotonic — cumulative_pruned only
+            # grows).
+            ref_graph = _scan_variant_refs(results, parsed)
+            ref_prunable = set()
+            while True:
+                tainted = _propagate_reference_taint(
+                    cumulative_dirty_variants, ref_graph,
+                    emitted_now, bank_set,
+                    cumulative_pruned | ref_prunable)
+                next_ref_prunable = (
+                    _compute_prunable(
+                        tainted, emitted_now, canonical_variants)
+                    - cumulative_pruned
+                    - ref_prunable)
+                if not next_ref_prunable:
+                    break
+                ref_prunable |= next_ref_prunable
+            if not ref_prunable:
+                break
+            cumulative_pruned |= ref_prunable
+            valid_variants_map = _apply_variant_prune(
+                parsed, cumulative_pruned)
+            print(f"  reference-taint prune: dropped {len(ref_prunable)} "
+                  f"wrong-width caller clone(s) "
+                  f"({len(cumulative_pruned)} total); re-emitting")
+            # fall through -> exit-mx refresh -> loop re-emits
         # Auto-promoted callees did not exist when the earlier exit-M/X
         # autoroute ran. Refresh the auto-detected per-variant exit map
         # before the next emit pass so callers decode post-JSR/JSL code
@@ -1199,9 +1708,11 @@ def main() -> int:
                     ex_m & 1, ex_xf & 1)
                 per_variant_count += 1
         callee_exit_mx_modes = _build_callee_exit_mx_modes(callee_exit_mx)
+        exit_mx_rescan_all = True
         print(
             f"  auto-promote pass {pass_idx + 1}: "
             f"added {added} entries "
+            f"and {variant_added} refreshed variants "
             f"(calls={len(unresolved_calls)}); "
             f"refreshed {len(refreshed_exit_mx_fixes)} exit-mx routes; "
             f"re-emitting"
@@ -1342,6 +1853,21 @@ def main() -> int:
         for pc, em, ex in mx_set:
             pc24 = (bank3 << 16) | (pc & 0xFFFF)
             disp_variants.setdefault(pc24, set()).add((em, ex))
+    # Never reference a PRUNED variant from the dispatch table. The
+    # emit-truth / reference-taint prune drops a variant's definition,
+    # but cfg.entries can re-accumulate the clone in a later auto-promote
+    # pass (so disp_variants, built from cfg.entries above, still lists
+    # it). A fnptr to a dropped variant dangles -> LNK2001 (observed:
+    # MMX, 316 unresolved externals == the 316 emit-truth-pruned
+    # variants, all referenced by mmx_dispatch_v2.obj). The runtime
+    # dispatches by live (m,x) to a SURVIVING variant; the pruned slot
+    # must stay NULL (exactly the table's documented "NULL when that
+    # variant wasn't emitted" contract). No-op for games whose dispatch
+    # table never listed a pruned variant (SMW/ALttP).
+    for (addr, em, ex) in cumulative_pruned:
+        s = disp_variants.get(addr)
+        if s is not None:
+            s.discard((em & 1, ex & 1))
     sorted_pc24s = sorted(disp_variants.keys())
     disp_path = out_dir / f'{args.prefix}_dispatch_v2.c'
     disp_lines = [

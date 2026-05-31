@@ -376,6 +376,7 @@ void cpu_state_init(CpuState *cpu, uint8 *ram) {
     cpu->m_flag = 1;
     cpu->x_flag = 1;
     cpu->emulation = 1;
+    cpu->host_return_valid = 0;
     cpu->_flag_N = 0;
     cpu->_flag_V = 0;
     cpu->_flag_Z = 0;

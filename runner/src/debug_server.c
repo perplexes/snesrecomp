@@ -636,6 +636,13 @@ void debug_server_arm_default_wram_trace(void) {
     s_wram_trace.ranges[s_wram_trace.nranges].lo = 0x000A2;
     s_wram_trace.ranges[s_wram_trace.nranges].hi = 0x000A6;
     s_wram_trace.nranges++;
+    /* ALttP NMI DMA source tile buffer — decompressed tile data that gets
+     * DMA'd to VRAM. Without this range, DMA writes via $2180 (snes_writeBBus
+     * case 0x80) are never captured in the ring, making $7E:C700 corruption
+     * invisible to wram_writes_at queries. */
+    s_wram_trace.ranges[s_wram_trace.nranges].lo = 0x0C700;
+    s_wram_trace.ranges[s_wram_trace.nranges].hi = 0x0E6FF;
+    s_wram_trace.nranges++;
     s_wram_trace.active = 1;
 }
 
@@ -864,10 +871,10 @@ static inline int rdb_range_hit(uint32_t adr, uint8_t width) {
 }
 
 static inline void rdb_record(uint32_t adr, uint16_t old_val, uint16_t new_val, uint8_t width) {
-    extern uint8_t g_boundary_frozen;
-    if (g_boundary_frozen) return;  /* same tripwire freezes the WRAM ring,
-                                       so the slice at the frozen frame survives
-                                       instead of evicting while the game runs on */
+    /* g_boundary_frozen is intentionally NOT checked here. It freezes the NLR
+     * boundary-audit ring to preserve a snapshot, but the WRAM write trace ring
+     * (s_wram_trace) has its own `active` flag as its sole on/off control. An NLR
+     * ancestor-skip should not permanently block WRAM write capture. */
     if (!s_wram_trace.active) return;
     if (!rdb_range_hit(adr, width)) return;
     int idx = s_wram_trace.write_idx % WRAM_TRACE_LOG_SIZE;
@@ -1939,20 +1946,25 @@ static void cmd_step(const char *args) {
     int start_frame = snes_frame_counter;
     s_step_remaining = n;
     s_paused = 0;
-    /* BLOCK until the main loop has run the requested frames and re-paused.
-     * Caps at ~5 s of wall-clock wait (150k × 30 µs) so a stuck main loop
-     * doesn't wedge the network thread forever — if the timeout hits,
-     * respond with what we have and let the caller diagnose. */
+    /* Release the mutex so the main thread can run frames and call
+     * debug_server_record_frame (which also needs the mutex for snapshotting).
+     * Without releasing here, the main thread deadlocks: it decrements
+     * s_step_remaining before the mutex lock, then blocks waiting for the
+     * mutex the TCP thread still holds, so s_step_remaining never reaches 0.
+     * Re-acquire before returning; caller (try_recv_and_process) expects it. */
+    unlock_mutex();
     int waited = 0;
-    while (s_step_remaining > 0 && waited < 150000) {
+    while (s_step_remaining > 0) {
 #ifdef _WIN32
-        Sleep(0);
+        Sleep(1);                          /* 1 ms per iter; cap at 5 000 ms */
+        if (++waited >= 5000) break;
 #else
         struct timespec ts = {0, 30000};  /* 30 µs */
         nanosleep(&ts, NULL);
+        if (++waited >= 150000) break;    /* cap at 4.5 s */
 #endif
-        waited++;
     }
+    lock_mutex();
     send_fmt("{\"ok\":true,\"stepped\":%d,\"frame_before\":%d,\"frame_after\":%d%s}",
              n, start_frame, snes_frame_counter,
              (s_step_remaining > 0) ? ",\"timeout\":true" : "");

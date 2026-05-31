@@ -162,6 +162,217 @@ def _classify_trampoline_returns(cfg: V2CFG) -> set:
     return flagged
 
 
+def scan_tail_call_stack_delta(
+        rom: bytes, bank: int, start: int,
+        entry_m: int, entry_x: int,
+        *,
+        end: Optional[int] = None,
+        sibling_entry_pcs: Optional[set] = None,
+        exclude_ranges=None,
+        data_regions=None,
+        dispatch_helpers=None,
+        indirect_call_tables=None,
+        indirect_dispatch=None,
+        callee_exit_mx=None,
+        callee_exit_mx_modes=None,
+) -> Dict[int, int]:
+    """Compute the net cpu->S delta at every same-bank tail-call exit.
+
+    Decodes the function, runs a stack-height dataflow identical to
+    _classify_trampoline_returns, and records the accumulated delta at
+    each block exit whose successor PC is in `sibling_entry_pcs`.
+
+    Returns {target_pc16: delta} where delta > 0 means net push (cpu->S
+    decreased from entry — the typical PHB/PHK-then-PLB pattern).  The
+    callee at target_pc16 should record `_entry_s = cpu->S + delta` so
+    the host-return check passes after the callee's matching PLB epilogue.
+
+    Only entries where ALL control-flow paths agree on the same non-zero
+    integer delta are returned.  Indeterminate paths (TCS/TXS) or
+    divergent paths are silently omitted — the cfg `entry_s_offset` hint
+    remains available as a manual override for those cases.
+
+    Returns {} on decode error, no tail-call exits, or no agreed delta.
+    """
+    if not sibling_entry_pcs:
+        return {}
+
+    try:
+        graph = decode_function(
+            rom, bank, start, entry_m, entry_x, end=end,
+            dispatch_helpers=dispatch_helpers,
+            indirect_call_tables=indirect_call_tables,
+            indirect_dispatch=indirect_dispatch,
+            data_regions=data_regions,
+            callee_exit_mx=callee_exit_mx,
+            callee_exit_mx_modes=callee_exit_mx_modes,
+            sibling_entry_pcs=sibling_entry_pcs,
+        )
+    except Exception:
+        return {}
+
+    cfg = build_cfg(graph)
+    if cfg.entry not in cfg.blocks:
+        return {}
+
+    # Dataflow: each state is either an int (net delta from entry) or None
+    # (indeterminate — saw TCS/TXS).  We propagate sets of these values
+    # along CFG edges, mirroring _classify_trampoline_returns.
+    in_states: Dict[DecodeKey, set] = {cfg.entry: {0}}
+    worklist: List[DecodeKey] = [cfg.entry]
+    visited_edges: set = set()
+
+    # target_pc16 -> set of observed deltas (None = indeterminate on >=1 path)
+    exit_deltas: Dict[int, set] = {}
+
+    while worklist:
+        key = worklist.pop()
+        block = cfg.blocks.get(key)
+        if block is None:
+            continue
+        states = set(in_states.get(key, set()))
+        if not states:
+            continue
+
+        for di in block.insns:
+            if di.insn.mnem in ('RTS', 'RTL', 'RTI'):
+                states = set()  # this path ends here; don't propagate
+                break
+            delta = _stack_delta_for_trampoline_scan(di)
+            next_s = set()
+            for s in states:
+                if s is None or delta is None:
+                    next_s.add(None)  # indeterminate
+                else:
+                    next_s.add(_clamp_stack_delta(s + delta))
+            states = next_s
+
+        if not states:
+            continue
+
+        for succ in block.successors:
+            succ_pc16 = succ.pc & 0xFFFF
+            if succ_pc16 in sibling_entry_pcs:
+                # Tail-call exit into a sibling function
+                s = exit_deltas.setdefault(succ_pc16, set())
+                s |= states
+            elif succ in cfg.blocks:
+                edge = (key, succ)
+                if edge not in visited_edges:
+                    visited_edges.add(edge)
+                    old = in_states.get(succ, set())
+                    merged = old | states
+                    if merged != old:
+                        in_states[succ] = merged
+                        worklist.append(succ)
+
+    result = {}
+    for pc16, deltas in exit_deltas.items():
+        if None in deltas:
+            continue  # indeterminate path — skip; use manual entry_s_offset
+        if len(deltas) != 1:
+            continue  # divergent paths disagree — skip
+        delta = next(iter(deltas))
+        if delta != 0:
+            result[pc16] = delta
+    return result
+
+
+def scan_rts_stack_deltas(
+        rom: bytes, bank: int, start: int,
+        entry_m: int, entry_x: int,
+        *,
+        end: Optional[int] = None,
+        sibling_entry_pcs: Optional[set] = None,
+        exclude_ranges=None,
+        data_regions=None,
+        dispatch_helpers=None,
+        indirect_call_tables=None,
+        indirect_dispatch=None,
+        callee_exit_mx=None,
+        callee_exit_mx_modes=None,
+) -> Optional[int]:
+    """Compute the net cpu->S delta from function entry to all RTS/RTL exits.
+
+    Returns the single agreed-upon delta if ALL RTL/RTS exits in the
+    function observe the same deterministic stack height, or None if
+    any exit is indeterminate (TCS/TXS) or the exits disagree.
+
+    delta > 0 means net push (cpu->S decreased from entry — e.g. PHB at
+    entry that isn't matched by PLB before RTL).
+    delta < 0 means net pop  (cpu->S increased from entry — e.g. PLB
+    before RTL restoring a PHB pushed by the tail-call caller).
+    delta = 0 means stack-balanced (standard case).
+    """
+    try:
+        graph = decode_function(
+            rom, bank, start, entry_m, entry_x, end=end,
+            dispatch_helpers=dispatch_helpers,
+            indirect_call_tables=indirect_call_tables,
+            indirect_dispatch=indirect_dispatch,
+            data_regions=data_regions,
+            callee_exit_mx=callee_exit_mx,
+            callee_exit_mx_modes=callee_exit_mx_modes,
+            sibling_entry_pcs=sibling_entry_pcs or set(),
+        )
+    except Exception:
+        return None
+
+    cfg = build_cfg(graph)
+    if cfg.entry not in cfg.blocks:
+        return None
+
+    in_states: Dict[DecodeKey, set] = {cfg.entry: {0}}
+    worklist: List[DecodeKey] = [cfg.entry]
+    visited_edges: set = set()
+    rts_deltas: set = set()
+
+    while worklist:
+        key = worklist.pop()
+        block = cfg.blocks.get(key)
+        if block is None:
+            continue
+        states = set(in_states.get(key, set()))
+        if not states:
+            continue
+
+        for di in block.insns:
+            if di.insn.mnem in ('RTS', 'RTL', 'RTI'):
+                rts_deltas |= states
+                states = set()
+                break
+            delta = _stack_delta_for_trampoline_scan(di)
+            next_s = set()
+            for s in states:
+                if s is None or delta is None:
+                    next_s.add(None)
+                else:
+                    next_s.add(_clamp_stack_delta(s + delta))
+            states = next_s
+
+        if not states:
+            continue
+
+        for succ in block.successors:
+            if succ in cfg.blocks:
+                edge = (key, succ)
+                if edge not in visited_edges:
+                    visited_edges.add(edge)
+                    old = in_states.get(succ, set())
+                    merged = old | states
+                    if merged != old:
+                        in_states[succ] = merged
+                        worklist.append(succ)
+
+    if not rts_deltas:
+        return None
+    if None in rts_deltas:
+        return None
+    if len(rts_deltas) != 1:
+        return None
+    return next(iter(rts_deltas))
+
+
 def emit_function(rom: bytes, bank: int, start: int,
                   entry_m: int, entry_x: int,
                   *, end: Optional[int] = None,
@@ -182,7 +393,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                   sibling_entry_pcs: Optional[set] = None,
                   hle_spc_upload=None,
                   hle_func=None,
-                  hle_dispatch=None) -> str:
+                  hle_dispatch=None,
+                  entry_s_offset: int = 0) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
     Pipeline:
@@ -383,15 +595,20 @@ def emit_function(rom: bytes, bank: int, start: int,
     block_per_insn_ir: Dict[DecodeKey, List[Tuple[object, List[IROp]]]] = {}
     block_ir: Dict[DecodeKey, List[IROp]] = {}
     def _tail_call_stmt(call_expr: str, comment: str,
-                        nlr_info_for_block: Optional[dict] = None) -> str:
+                        nlr_info_for_block: Optional[dict] = None,
+                        *,
+                        prefix: str = "") -> str:
         # Option-1 cpu->S ABI: a tail JMP/JML does NOT push a return frame;
         # the tail callee inherits THIS function's host-return validity (a
-        # tail-call hands off our return obligation). NLR is no longer
-        # signalled via _pending_skip — it flows through cpu->S + dispatch,
-        # so nlr_info_for_block is ignored here.
+        # tail-call hands off our return obligation) and THIS function's
+        # entry-S baseline (a split shared suffix may pop bytes pushed before
+        # the tail transfer). NLR is no longer signalled via _pending_skip —
+        # it flows through cpu->S + dispatch, so nlr_info_for_block is
+        # ignored here.
         del nlr_info_for_block
         return (
-            f"{{ cpu->host_return_valid = _hrv; "
+            f"{prefix}{{ cpu->host_return_valid = _hrv; "
+            f"cpu_tailcall_inherit_return_context(_entry_s, _hrv); "
             f"RecompReturn _tc = {call_expr}; "
             f"RecompStackPop(); return _tc; }}  {comment}"
         )
@@ -817,34 +1034,24 @@ def emit_function(rom: bytes, bank: int, start: int,
         if (tail_call_pc16 is not None
                 and tail_call_target_name is not None
                 and (target.pc & 0xFFFF) == (tail_call_pc16 & 0xFFFF)):
-            # Dispatch on runtime (m, x), not the static boundary key: a
-            # fall-through continues with the live mode, which can diverge
-            # from the static decode (decoder m/x drift). See the
-            # tail-call-past-end case below for the full rationale and the
-            # SMW RunPlayerBlockCode wrong-variant corruption it fixes.
-            # Demand all 4 variants so auto-promote synthesizes them (this
-            # also subsumes the cross-variant-externals demand the prior
-            # single-variant register_call_demand handled).
-            from v2.codegen import register_call_demand, valid_variant_list
+            sib_suffix = _variant_suffix(target.m, target.x)
+            # Register cross-variant Call demand so v2_regen's auto-
+            # promote synthesizes the (m, x) body when it differs from
+            # the sibling's cfg-declared default. Without this, the
+            # C linker fails with "unresolved external _M{m}X{x}" when
+            # the boundary's (m, x) doesn't match the cfg-default of
+            # the sibling — exactly what tripped the zelda3 cross-
+            # variant externals (NMI_RunTileMapUpdateDMA_M0X1,
+            # SpotlightInternal_M1X0, etc.) on the 2026-05-17
+            # tail-call-past-end class fix.
+            from v2.codegen import register_call_demand
             tail_pc24 = (_SAME_BANK << 16) | (target.pc & 0xFFFF)
-            # Only the surviving (m,x) variants after the emit-truth
-            # prune pass — wrong-width siblings are dropped (no emitted
-            # body), so neither demand nor switch into them.
-            _vlist = valid_variant_list(tail_pc24)
-            for _em, _ex in _vlist:
-                register_call_demand(tail_pc24, _em, _ex)
-            _sw = " ".join(
-                f"case {(_em << 1) | _ex}: _tc = {tail_call_target_name}"
-                f"{_variant_suffix(_em, _ex)}(cpu); break;"
-                for _em, _ex in _vlist
-            )
-            return (
-                f"{prefix}{{ RecompReturn _tc; "
-                f"switch (((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)) {{ "
-                f"{_sw} default: _tc = RECOMP_RETURN_NORMAL; break; }} "
-                f"RecompStackPop(); return _tc; }}"
-                f"  /* tail_call into sibling at ${target.pc & 0xFFFF:04X} "
-                f"(cfg tail_call:), runtime (m,x) dispatch */"
+            register_call_demand(tail_pc24, target.m, target.x)
+            return _tail_call_stmt(
+                f"{tail_call_target_name}{sib_suffix}(cpu)",
+                f"/* tail_call into sibling fn at ${target.pc & 0xFFFF:04X} "
+                f"(cfg tail_call: directive) */",
+                prefix=prefix,
             )
 
         # Tail-call past `end:` boundary into a declared sibling
@@ -875,34 +1082,13 @@ def emit_function(rom: bytes, bank: int, start: int,
                                  valid_variant_list)
         sibling_name = get_name_for_pc(target_pc24)
         if sibling_name is not None:
-            # A fall-through into the sibling continues executing with the
-            # CURRENT runtime (m, x) — which can diverge from this boundary's
-            # STATIC decode key (decoder m/x drift; e.g. SMW
-            # RunPlayerBlockCode $EE1D is entered at runtime x=1 while the
-            # static decode said x=0). Hardcoding the static variant then
-            # runs a wrong-width body: operands misdecode and, under the
-            # Option-1 cpu->S ABI, a phantom RTS/PHD pops cpu->S and corrupts
-            # the stack. Dispatch on runtime cpu->m_flag/x_flag instead, the
-            # same way codegen._emit_call resolves JSR/JSL variants. Demand
-            # all 4 variants so v2_regen auto-promote synthesizes whichever
-            # the static analysis didn't produce.
-            # Only the surviving (m,x) variants after the emit-truth
-            # prune pass — wrong-width siblings have no emitted body.
-            _vlist = valid_variant_list(target_pc24)
-            for _em, _ex in _vlist:
-                register_call_demand(target_pc24, _em, _ex)
-            _sw = " ".join(
-                f"case {(_em << 1) | _ex}: _tc = {sibling_name}"
-                f"{_variant_suffix(_em, _ex)}(cpu); break;"
-                for _em, _ex in _vlist
-            )
-            return (
-                f"{prefix}{{ RecompReturn _tc; "
-                f"switch (((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)) {{ "
-                f"{_sw} default: _tc = RECOMP_RETURN_NORMAL; break; }} "
-                f"RecompStackPop(); return _tc; }}"
-                f"  /* tail-call past end -> {sibling_name} at "
-                f"${target.pc & 0xFFFF:04X}, runtime (m,x) dispatch */"
+            sib_suffix = _variant_suffix(target.m, target.x)
+            register_call_demand(target_pc24, target.m, target.x)
+            return _tail_call_stmt(
+                f"{sibling_name}{sib_suffix}(cpu)",
+                f"/* tail-call past end: into {sibling_name}{sib_suffix} "
+                f"at ${target.pc & 0xFFFF:04X} */",
+                prefix=prefix,
             )
 
         # Unresolvable cross-function jump.
@@ -1455,13 +1641,13 @@ def emit_function(rom: bytes, bank: int, start: int,
     # whose own CFG has no PEI. Conditional `_entry_s` left those
     # variants with an undeclared-identifier error at the trampoline
     # branch (mmx_08_v2.c bank-08 build break, 2026-05-24).
-    src.append(f'  uint16 _entry_s = cpu->S;')
-    src.append(f'  (void)_entry_s;  /* used by trampoline balance check */')
-    # Record this frame's entry-S parallel to the recomp call stack so a
-    # return-to-ancestor RTS (manual PLA/PLX/PLB rebalance + RTS) can be
-    # resolved to a SKIP_N non-local return (cpu_resolve_ancestor_skip).
-    # Index by the just-pushed g_recomp_stack_top; pop is implicit (top--).
-    src.append(f'  if (g_recomp_stack_top >= 1) g_cpu_entry_s[g_recomp_stack_top - 1] = _entry_s;')
+    if entry_s_offset:
+        sign = '+' if entry_s_offset > 0 else '-'
+        src.append(
+            f'  uint16 _entry_s = (uint16)(cpu->S {sign} {abs(entry_s_offset)}u);'
+            f'  /* entry_s_offset:{entry_s_offset} — caller left stack imbalanced */')
+    else:
+        src.append(f'  uint16 _entry_s = cpu->S;')
     # Option-1 cpu->S return-frame ABI (see IMPROVEMENTS.md): capture whether
     # a paired host-C caller exists at entry. RTS/RTL may host-return NORMAL
     # only when _hrv==1 AND the stack is balanced (cpu->S == _entry_s);
@@ -1469,7 +1655,16 @@ def emit_function(rom: bytes, bank: int, start: int,
     # cpu->host_return_valid right before each invoke (direct call -> 1;
     # tail JMP/JML -> propagate the caller's _hrv; dispatch -> 0).
     src.append(f'  uint8 _hrv = cpu->host_return_valid;')
+    src.append(f'  if (cpu_take_tailcall_return_context(&_entry_s, &_hrv)) {{')
+    src.append(f'    cpu->host_return_valid = _hrv;')
+    src.append(f'  }}')
+    src.append(f'  (void)_entry_s;  /* used by trampoline balance check */')
     src.append(f'  (void)_hrv;')
+    # Record this frame's entry-S parallel to the recomp call stack so a
+    # return-to-ancestor RTS (manual PLA/PLX/PLB rebalance + RTS) can be
+    # resolved to a SKIP_N non-local return (cpu_resolve_ancestor_skip).
+    # Index by the just-pushed g_recomp_stack_top; pop is implicit (top--).
+    src.append(f'  if (g_recomp_stack_top >= 1) g_cpu_entry_s[g_recomp_stack_top - 1] = _entry_s;')
     for i, key in enumerate(block_order):
         src.append(f"  {_label_for(key)}:")
         # Trace block entry — gives us the SNES PC chain in the trace ring.

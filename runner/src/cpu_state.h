@@ -356,6 +356,18 @@ static inline void cpu_push_interrupt_frame(CpuState *cpu) {
 static inline void cpu_push_jsr_return_frame(CpuState *cpu) {
     cpu_write8(cpu, 0x00, cpu->S, 0x00); cpu->S = (uint16)(cpu->S - 1);  /* PCH */
     cpu_write8(cpu, 0x00, cpu->S, 0x00); cpu->S = (uint16)(cpu->S - 1);  /* PCL */
+    cpu->host_return_valid = 1;
+}
+
+/* Model a 65816 hardware JSL's 3-byte return-frame push for host glue
+ * that calls a long subroutine alias directly. The sentinel address is
+ * only observed on a trampoline miss; a balanced RTL host-returns before
+ * dispatching on it. */
+static inline void cpu_push_jsl_return_frame(CpuState *cpu) {
+    cpu_write8(cpu, 0x00, cpu->S, 0xFF); cpu->S = (uint16)(cpu->S - 1);  /* PB */
+    cpu_write8(cpu, 0x00, cpu->S, 0xFF); cpu->S = (uint16)(cpu->S - 1);  /* PCH */
+    cpu_write8(cpu, 0x00, cpu->S, 0xFF); cpu->S = (uint16)(cpu->S - 1);  /* PCL */
+    cpu->host_return_valid = 1;
 }
 
 /* ── Initialisation ─────────────────────────────────────────────────────── */

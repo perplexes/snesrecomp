@@ -67,6 +67,23 @@ int g_recomp_stack_top = 0;
  * decrement contract. See ISSUES.md "shared-tail multi-level non-local
  * return" (the fish-explosion OAM wipe). */
 uint16_t g_cpu_entry_s[RECOMP_STACK_DEPTH];
+static uint8_t g_tailcall_context_valid;
+static uint16_t g_tailcall_entry_s;
+static uint8_t g_tailcall_hrv;
+
+void cpu_tailcall_inherit_return_context(uint16_t entry_s, uint8_t hrv) {
+  g_tailcall_entry_s = entry_s;
+  g_tailcall_hrv = hrv;
+  g_tailcall_context_valid = 1;
+}
+
+int cpu_take_tailcall_return_context(uint16_t *entry_s, uint8_t *hrv) {
+  if (!g_tailcall_context_valid) return 0;
+  if (entry_s) *entry_s = g_tailcall_entry_s;
+  if (hrv) *hrv = g_tailcall_hrv;
+  g_tailcall_context_valid = 0;
+  return 1;
+}
 
 int cpu_resolve_ancestor_skip(uint16_t ret_s) {
   /* The current (top-1) frame is the one whose RTS we are resolving; it
@@ -186,6 +203,7 @@ void WatchdogFrameStart(void) {
   g_watchdog_tripped = 0;
   g_watchdog_counter = 0;
   g_recomp_stack_top = 0;
+  g_tailcall_context_valid = 0;
 }
 
 // Called at loop headers in generated code — detect infinite loops

@@ -35,6 +35,8 @@ void RecompStackPop(void);
 extern int g_recomp_stack_top;
 extern uint16_t g_cpu_entry_s[];
 int cpu_resolve_ancestor_skip(uint16_t ret_s);
+void cpu_tailcall_inherit_return_context(uint16_t entry_s, uint8_t hrv);
+int cpu_take_tailcall_return_context(uint16_t *entry_s, uint8_t *hrv);
 #include <setjmp.h>
 extern jmp_buf g_watchdog_jmp;
 extern int g_watchdog_tripped;

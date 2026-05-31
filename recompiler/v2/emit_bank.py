@@ -26,7 +26,7 @@ for p in (str(_THIS_DIR), str(_RECOMPILER_DIR)):
         sys.path.insert(0, p)
 
 from dataclasses import dataclass  # noqa: E402
-from typing import Dict, List, Optional, Tuple  # noqa: E402
+from typing import List, Optional, Tuple  # noqa: E402
 
 from v2.emit_function import emit_function  # noqa: E402
 
@@ -59,6 +59,13 @@ class BankEntry:
     entry_m: int = 1
     entry_x: int = 1
     tail_call_pc16: Optional[int] = None
+    # entry_s_offset: signed adjustment applied to cpu->S when recording
+    # _entry_s at function entry.  Use when the function is only ever
+    # tail-called from a sibling that left the stack in a non-standard
+    # state (e.g. an unmatched PHB), so the host-return check
+    # (_hrv && _ret_s == _entry_s) fires correctly.  Default 0 (no
+    # adjustment).  Set via cfg `entry_s_offset:<n>` on a func line.
+    entry_s_offset: int = 0
 
 
 def emit_bank(rom: bytes, bank: int,
@@ -126,6 +133,13 @@ def emit_bank(rom: bytes, bank: int,
     # start so back-edges to self stay local.
     all_entry_pcs = {e.start & 0xFFFF for e in entries}
 
+    # Tail-call stack imbalance is handled dynamically by emitted tail
+    # transfers: they pass the caller's _entry_s/_hrv to the tail target,
+    # and the target prologue consumes that context before recording its
+    # frame. Do not auto-mutate entry.entry_s_offset here; a fixed per-entry
+    # offset is weaker than the runtime context and conflicts across variants.
+    # Manual cfg `entry_s_offset:<n>` remains supported for explicit projects.
+
     for entry in entries:
         tail_call_target_name = None
         if entry.tail_call_pc16 is not None:
@@ -159,6 +173,7 @@ def emit_bank(rom: bytes, bank: int,
             exclude_ranges=exclude_ranges,
             tail_call_pc16=entry.tail_call_pc16,
             tail_call_target_name=tail_call_target_name,
+            entry_s_offset=entry.entry_s_offset,
             callee_exit_mx=callee_exit_mx,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_pcs,

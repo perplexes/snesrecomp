@@ -1165,8 +1165,10 @@ def _emit_indirect_dispatch(insn) -> List[str]:
     # Option-1 cpu->S ABI: a real JSR (abs,X) call pushes a 2-byte return
     # frame and enters the handler with host_return_valid=1. A JMP/JML
     # indirect dispatch is a tail transfer — no frame pushed; the handler
-    # inherits THIS function's host-return validity (_hrv). Set once here;
-    # all dispatch sub-forms below invoke the handler after this point.
+    # inherits THIS function's host-return validity (_hrv). The handler also
+    # inherits THIS function's entry-S baseline at the individual call site,
+    # so split shared suffixes do not record a fresh stack baseline after the
+    # tail transfer.
     if is_jsr:
         _iret16 = (site_pc24 + 2) & 0xFFFF  # JSR (abs,X) is 3 bytes; push return-1
         lines.append(f"  cpu_write8(cpu, 0x00, cpu->S, 0x{(_iret16 >> 8) & 0xFF:02x}); cpu->S = (uint16)(cpu->S - 1);")
@@ -1334,6 +1336,9 @@ def _emit_indirect_dispatch(insn) -> List[str]:
             name = f"{base_name}{suffix}"
             env = emitter_helpers.call_with_pb_save(target_bank, name)
             for stmt in env:
+                if not is_jsr and stmt.endswith(f"{name}(cpu);"):
+                    lines.append(
+                        "      cpu_tailcall_inherit_return_context(_entry_s, _hrv);")
                 lines.append(f"      {stmt}")
         else:
             # General indirect dispatch: runtime (m, x) dispatch inside
@@ -1354,6 +1359,13 @@ def _emit_indirect_dispatch(insn) -> List[str]:
             for em_v, ex_v in valid_variant_list(tgt_addr):
                 idx_v = (em_v << 1) | ex_v
                 name_v = f"{base_name}{_variant_suffix(em_v, ex_v)}"
+                if not is_jsr:
+                    lines.append(f"        case {idx_v}:")
+                    lines.append(
+                        "          cpu_tailcall_inherit_return_context(_entry_s, _hrv);")
+                    lines.append(f"          _r = {name_v}(cpu);")
+                    lines.append("          break;")
+                    continue
                 lines.append(f"        case {idx_v}: _r = {name_v}(cpu); break;")
             lines.append("        default: _r = RECOMP_RETURN_NORMAL; break;")
             lines.append("      }")
