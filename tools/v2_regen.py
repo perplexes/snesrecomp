@@ -67,6 +67,31 @@ from v2.pha_rts_autoroute import (  # noqa: E402
 _BANK_CFG_RE = re.compile(r'bank([0-9a-fA-F]+)\.cfg$')
 
 
+def write_if_changed(path, content: str) -> bool:
+    """Write `content` to `path` only if it differs from what's already
+    on disk. Returns True if a write happened, False if skipped.
+
+    Optimization (2026-05-31): the regen rewrites every generated .c on
+    every fixpoint pass. The vast majority of banks are byte-identical
+    pass-to-pass (and run-to-run), so unconditional writes needlessly
+    bump mtimes -> the C build then recompiles every bank object even
+    when only one bank's bytes actually changed. Content-gating the
+    write preserves mtimes on unchanged files so the incremental build
+    skips their objects. Newline normalized to '\\n' to match the
+    write_text(..., newline='\\n') the callers used.
+    """
+    try:
+        existing = path.read_text(encoding='utf-8')
+        # read_text() translates platform newlines; compare against the
+        # same normalization the writer applies.
+        if existing == content:
+            return False
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        pass
+    path.write_text(content, encoding='utf-8', newline='\n')
+    return True
+
+
 # Stub-lint markers. Any emitted C line containing one of these strings
 # is a recompiler stub — a code path that produced "do nothing" / "trap
 # and return" placeholder output instead of real behavior. Hard-rule:
@@ -1554,7 +1579,7 @@ def main() -> int:
                 failed.append((bank, r['error']))
                 continue
             out_path = out_dir / f'{args.prefix}_{bank:02x}_v2.c'
-            out_path.write_text(r['src'], encoding='utf-8', newline='\n')
+            write_if_changed(out_path, r['src'])
             all_suppressed.extend(r['suppressed'])
             all_const_z_folds.extend(r['const_z_folds'])
             all_dispatch_suppressed.extend(r['dispatch_suppressed'])
@@ -1818,7 +1843,7 @@ def main() -> int:
                 f'}}'
             )
             total_stubs += 1
-    stub_path.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='\n')
+    write_if_changed(stub_path, '\n'.join(lines) + '\n')
     if total_stubs:
         print(f"  emitted stubs for {total_stubs} cross-ROM-bank (target, m, x) variants -> {stub_path}")
     else:
@@ -1919,8 +1944,7 @@ def main() -> int:
         f"(unsigned)(sizeof(g_dispatch_table) / sizeof(g_dispatch_table[0]));"
     )
     disp_lines.append('')
-    disp_path.write_text('\n'.join(disp_lines) + '\n',
-                         encoding='utf-8', newline='\n')
+    write_if_changed(disp_path, '\n'.join(disp_lines) + '\n')
     print(f"  emitted dispatch table with {len(sorted_pc24s)} entries -> {disp_path}")
 
     # cfg-required-dispatch-or-kill report. Every JSR (abs,X) site
