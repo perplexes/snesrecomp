@@ -96,7 +96,7 @@ def emit_funcs_h(items: list) -> str:
     lines.append(' * referenced by recompiled code via funcs.h.')
     lines.append(' */')
     lines.append('void ResetSpritesFunc(int wh);')
-    lines.append('void SmwRunOneFrameOfGame_Internal(void);')
+    lines.append('void RunOneFrameOfGame_Internal(void);')
     lines.append('')
     lines.append('/* Watchdog hook called at every block label. Implemented in')
     lines.append(' * snesrecomp/runner/src/common_cpu_infra.c.')
