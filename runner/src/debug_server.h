@@ -164,61 +164,18 @@ void debug_on_block_enter(uint32_t pc, uint32_t a, uint32_t x, uint32_t y);
 #define RDB_BLOCK_HOOK(pc, a, x, y) \
     debug_on_block_enter((uint32_t)(pc), (uint32_t)(a), (uint32_t)(x), (uint32_t)(y))
 
-// Tier-4 reads: WRAM read trace. Every g_ram[X] read in --reverse-debug
-// generated code routes through RDB_LOAD8 / RDB_LOAD16, which in
-// non-instrumented builds expand to plain memory accesses (zero
-// runtime cost, byte-identical Release|x64 binary). In Oracle builds
-// the macros call debug_wram_read_byte/word which records (frame,
-// block_idx, addr, val, func, parent) into a ring filtered by armed
-// trace ranges. Read-trace is the symmetric counterpart of Tier 1's
-// write trace; needed to answer "what value was in $XX when this
-// branch evaluated".
-//
-// Gated identically to RDB_INSN_HOOK: ENABLE_ORACLE_BACKEND auto-
-// defines SNESRECOMP_TIER4 (+ implicitly Tier-4-reads).
-#if defined(SNESRECOMP_TIER4) || defined(ENABLE_ORACLE_BACKEND)
-uint8_t  debug_wram_read_byte(uint32_t addr);
-uint16_t debug_wram_read_word(uint32_t addr);
-#  define RDB_LOAD8(addr)  debug_wram_read_byte((uint32_t)(addr))
-#  define RDB_LOAD16(addr) debug_wram_read_word((uint32_t)(addr))
-#else
-#  define RDB_LOAD8(addr)  (g_ram[(addr)])
-#  define RDB_LOAD16(addr) (*(uint16_t *)(g_ram + (addr)))
-#endif
+// WRAM read trace macros. Every g_ram[X] read in --reverse-debug
+// generated code routes through RDB_LOAD8 / RDB_LOAD16, which expand to
+// plain memory accesses (zero runtime cost, byte-identical Release|x64
+// binary).
+#define RDB_LOAD8(addr)  (g_ram[(addr)])
+#define RDB_LOAD16(addr) (*(uint16_t *)(g_ram + (addr)))
 
-// Tier-4 per-instruction hook. Emitted by recomp.py --reverse-debug
-// at the top of every C-equivalent of a 65816 instruction. The runtime
-// ring captures (frame, block_idx, pc, mnemonic_id), giving full
-// instruction-level execution trace for divergence analysis at the
-// finest possible granularity short of CPU-cycle accounting. Mnemonic
-// is passed as a small int (mnemonic table index) to keep entries
-// compact; the table is published over TCP via get_insn_mnemonics.
-//
-// Gated on SNESRECOMP_TIER4 (separate from SNESRECOMP_REVERSE_DEBUG)
-// so that Oracle builds can opt in without bloating production
-// Release|x64 binaries. The Oracle MSBuild config defines
-// ENABLE_ORACLE_BACKEND which auto-defines SNESRECOMP_TIER4 below;
-// Release|x64 leaves both undefined and the macro expands to a void
-// no-op, costing zero bytes in the binary regardless of how many
-// times the generator emitted it.
-#if defined(SNESRECOMP_TIER4) || defined(ENABLE_ORACLE_BACKEND)
-#  ifndef SNESRECOMP_TIER4
-#    define SNESRECOMP_TIER4 1
-#  endif
-// Tier-4 extended insn-hook: carries the full recomp symbolic tracker
-// state. a/x/y/b are RDB_REG_UNKNOWN when recomp couldn't statically
-// pin them. mx_flags packs m (bit 0) and x (bit 1) bits per ROM
-// insn (e_flag is always 0 — recomp doesn't model emulation mode).
-void debug_on_insn_enter(uint32_t pc, uint32_t mnem_id,
-                         uint32_t a, uint32_t x, uint32_t y, uint32_t b,
-                         uint32_t mx_flags);
-#  define RDB_INSN_HOOK(pc, mnem_id, a, x, y, b, mx) \
-      debug_on_insn_enter((uint32_t)(pc), (uint32_t)(mnem_id), \
-                          (uint32_t)(a), (uint32_t)(x), (uint32_t)(y), \
-                          (uint32_t)(b), (uint32_t)(mx))
-#else
-#  define RDB_INSN_HOOK(pc, mnem_id, a, x, y, b, mx) ((void)0)
-#endif
+// Per-instruction hook. Emitted by recomp.py --reverse-debug at the top
+// of every C-equivalent of a 65816 instruction. Expands to a void no-op,
+// costing zero bytes in the binary regardless of how many times the
+// generator emitted it.
+#define RDB_INSN_HOOK(pc, mnem_id, a, x, y, b, mx) ((void)0)
 #endif
 
 #endif
