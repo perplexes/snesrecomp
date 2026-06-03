@@ -326,6 +326,43 @@ def test_scan_variant_refs_excludes_mx_switch_no_overtaint():
     assert (caller, 1, 1) not in tainted
 
 
+def test_scan_variant_refs_ignores_alias_section_calls():
+    """REGRESSION (SMW/ALttP non-convergence treadmill, 2026-06-02): the
+    un-suffixed `void <name>(CpuState *cpu)` entry-point aliases that
+    emit_bank appends AFTER every bank's bodies each forward to their own
+    variant (`RecompReturn _r = <name>_MmXx(cpu);` — a _VARIANT_CALL_RE hit).
+    The alias def line is NOT a `RecompReturn ..._MmXx` variant def, so the
+    scanner must reset `cur` on it; otherwise EVERY alias call is attributed
+    to whatever real RecompReturn body was emitted LAST in the bank. That
+    body then carries hundreds of phantom edges (incl. any dirty-stub alias
+    like FE60), gets falsely tainted + pruned, and pruning it shifts "last
+    body" to the next victim — the prune never reaches a fixpoint."""
+    parsed = [(0x01, 'bank01.cfg', types.SimpleNamespace(entries=[
+        types.SimpleNamespace(name=None, start=0xE538, entry_m=0, entry_x=0),
+        types.SimpleNamespace(name=None, start=0x9000, entry_m=1, entry_x=1),
+        types.SimpleNamespace(name=None, start=0xFE60, entry_m=1, entry_x=1),
+    ]))]
+    results = [{'status': 'ok', 'bank': 0x01, 'src': '\n'.join([
+        # last real body before the alias section — makes NO cross call
+        "RecompReturn bank_01_E538_M0X0(CpuState *cpu) {",
+        "  RecompStackPop(); return RECOMP_RETURN_NORMAL;",
+        "}",
+        # alias section — each void wrapper forwards to its own variant;
+        # FE60 is a dirty stub, so without the fix E538_M0X0 absorbs it.
+        "void bank_01_9000(CpuState *cpu) {",
+        "  RecompReturn _r = bank_01_9000_M1X1(cpu);",
+        "}",
+        "void bank_01_FE60(CpuState *cpu) {",
+        "  RecompReturn _r = bank_01_FE60_M1X1(cpu);",
+        "}",
+    ])}]
+    refs = v2_regen._scan_variant_refs(results, parsed)
+    e538 = 0x01 << 16 | 0xE538
+    assert refs.get((e538, 0, 0)) is None, (
+        "alias-section calls must NOT attribute to the last real body "
+        f"(the alias-bleed non-convergence bug); got {refs}")
+
+
 def test_reference_taint_prunes_dangling_caller_clone():
     """The blocking LNK2019 case: a clean wrong-width caller clone
     (Module0F_SpotlightClose_M1X0) tail-calls a callee variant

@@ -298,21 +298,26 @@ def variant_dispatch_case_lines(addr_24: int, base_name: str,
     taken — i.e. exactly the broken case.
 
     `pre_call` is an optional list of statements emitted INSIDE each case
-    before the variant call (e.g. the JMP tail-call return-context inherit);
-    when given, the multi-line case form is used."""
+    before the variant call (e.g. the JMP tail-call return-context inherit).
+
+    Every case/default is emitted as a SINGLE line beginning with
+    `case N:` / `default:` — even with `pre_call`, the statements are inlined
+    ahead of the variant call. This is REQUIRED: v2_regen's reference-taint
+    prune (`_scan_variant_refs`) excludes a line from the direct-reference
+    graph only when it starts with `case`/`default` (`_MX_DISPATCH_CASE_RE`).
+    A multi-line case would put `_r = NAME(cpu);` on its own line, which the
+    scanner then mis-counts as a DIRECT reference — and because these cases
+    route to the (shrinking) survivor set, that perturbs the prune fixpoint
+    into a non-terminating 1-clone-per-pass churn (observed regenerating
+    ALttP). Single-line keeps the runtime (m, x) switch correctly out of the
+    direct-reference graph (a switch case never dangles at runtime)."""
     survivors = list(valid_variant_list(addr_24))
     survivor_set = set(survivors)
     lines = []
 
     def emit(label: str, name: str, comment: str = ""):
-        if pre_call:
-            lines.append(f"{indent}{label}:{comment}")
-            for stmt in pre_call:
-                lines.append(f"{indent}  {stmt}")
-            lines.append(f"{indent}  _r = {name}(cpu);")
-            lines.append(f"{indent}  break;")
-        else:
-            lines.append(f"{indent}{label}: _r = {name}(cpu); break;{comment}")
+        pre = (" ".join(pre_call) + " ") if pre_call else ""
+        lines.append(f"{indent}{label}: {pre}_r = {name}(cpu); break;{comment}")
 
     for m, x in _MX_VARIANTS:
         idx = (m << 1) | x

@@ -308,6 +308,19 @@ def _scan_variant_refs(results, parsed) -> dict:
 
     defre = re.compile(
         r'^RecompReturn\s+([A-Za-z0-9_]+)_M([01])X([01])\(CpuState')
+    # The un-suffixed `void <name>(CpuState *cpu)` entry-point aliases that
+    # emit_bank appends after every bank's function bodies (one per cfg
+    # `name`). Their body is `RecompReturn _r = <name>_MmXx(cpu); ...` — a
+    # _VARIANT_CALL_RE hit. The alias def line is NOT a RecompReturn variant
+    # def, so without resetting `cur` here the scanner attributes ALL of the
+    # alias section's ~one-call-per-named-entry to whatever real variant body
+    # was emitted LAST in the bank. That mis-attribution (hundreds of phantom
+    # edges, incl. any dirty-stub alias) falsely taints the last body; pruning
+    # it shifts "last body" to the next victim and the prune never converges —
+    # the SMW/ALttP non-convergence treadmill (diagnosed 2026-06-02). An alias
+    # only forwards to its own canonical variant, never a cross-variant tail
+    # call, so it contributes no real reference-taint edge: reset `cur`.
+    aliasre = re.compile(r'^void\s+[A-Za-z0-9_]+\s*\(CpuState')
     refs: dict = {}
     for r in results:
         if r.get('status') != 'ok':
@@ -321,6 +334,9 @@ def _scan_variant_refs(results, parsed) -> dict:
                 cur = (None if start is None else
                        ((bank << 16) | start, int(mm.group(2)),
                         int(mm.group(3))))
+                continue
+            if aliasre.match(line):
+                cur = None  # entry-point alias wrapper — not a variant body
                 continue
             if cur is None:
                 continue
@@ -717,11 +733,13 @@ def main() -> int:
                         'pipeline phase to bound memory. Use this flag '
                         'to bisect output divergence the cache might '
                         'introduce.')
-    p.add_argument('--timeout-seconds', type=int, default=1800,
-                   help='Hard wall-clock cap for the whole regen. '
-                        'Default 1800s (30 min). On timeout, prints '
-                        'phase + cache stats to stderr and exits 124. '
-                        'Set to 0 to disable.')
+    p.add_argument('--timeout-seconds', type=int, default=5400,
+                   help='DEPRECATED / ignored. The regen wall-clock cap '
+                        'is FIXED at 5400s (1.5 h) and is not '
+                        'configurable — the per-call values we kept '
+                        'passing were always too short. This flag is '
+                        'retained only so existing callers do not error; '
+                        'its value has no effect.')
     # Default --jobs is read from SNESRECOMP_JOBS env var (matching the
     # SNESRECOMP_TRACE convention in the runner). Hardcoded fallback is
     # 1 (sequential) — safe for low-to-mid-end machines and preserves
@@ -764,22 +782,30 @@ def main() -> int:
               flush=True)
         clear_decode_cache()
 
-    if args.timeout_seconds > 0:
-        timeout_sec = args.timeout_seconds
+    # Regen wall-clock cap: FIXED at 5400s (1.5 h), always armed, NOT
+    # configurable. History: the cap was a `--timeout-seconds` knob
+    # (default 1800s) that every caller had to override and still got
+    # wrong — MMX alone blows past 30 min, so 1800s killed real regens
+    # mid-pipeline. Hardcoding a generous 1.5 h removes the footgun: you
+    # never pass a timeout, and it's never too short for a healthy regen.
+    # A run that genuinely needs >1.5 h is a red flag (runaway/looping),
+    # which is exactly when we WANT the watchdog to fire. (`args.
+    # timeout_seconds` is parsed but ignored — see the flag's help.)
+    timeout_sec = 5400
 
-        def _on_timeout() -> None:
-            elapsed = time.time() - regen_start_time
-            stats = decode_cache_stats()
-            print(f"\n!!! v2_regen TIMEOUT after {elapsed:.0f}s "
-                  f"(limit {timeout_sec}s) !!!",
-                  file=sys.stderr, flush=True)
-            print(f"!!! last phase cache: {stats} !!!",
-                  file=sys.stderr, flush=True)
-            os._exit(124)
+    def _on_timeout() -> None:
+        elapsed = time.time() - regen_start_time
+        stats = decode_cache_stats()
+        print(f"\n!!! v2_regen TIMEOUT after {elapsed:.0f}s "
+              f"(fixed 1.5 h cap = {timeout_sec}s) !!!",
+              file=sys.stderr, flush=True)
+        print(f"!!! last phase cache: {stats} !!!",
+              file=sys.stderr, flush=True)
+        os._exit(124)
 
-        watchdog = threading.Timer(timeout_sec, _on_timeout)
-        watchdog.daemon = True
-        watchdog.start()
+    watchdog = threading.Timer(timeout_sec, _on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
 
     set_decode_cache_enabled(False)  # hardcode off (cache key bug)
     only_banks: set | None = None
@@ -1479,6 +1505,37 @@ def main() -> int:
     # set (out-of-set targets get loud stub bodies, never dangle).
     bank_set = {b for (b, _p, _c) in parsed}
 
+    # ── Reference-taint non-convergence guard ───────────────────────────
+    # Failure mode (observed regenerating ALttP, 2026-06-02): once
+    # auto-promote + emit-truth prune stabilize, the reference-taint prune
+    # can lock into peeling a tiny constant number of wrong-width caller
+    # clones per pass — each full re-emit exposes one more dangling layer —
+    # and never reaches `ref_prunable == 0`. It would otherwise run to the
+    # wall-clock cap. A HEALTHY build does only a handful of reference-taint
+    # passes (MMX: 0–2) and terminates. So: if the prune does nothing BUT
+    # peel a small (<= RT_SMALL_DROP) count for RT_STALL_LIMIT consecutive
+    # passes, declare non-convergence and fail early with a diagnostic.
+    # Conservative — the limit sits far above any legitimate peel depth, so
+    # a real (deep-but-finite) drain finishes well before it trips.
+    RT_SMALL_DROP = 4
+    RT_STALL_LIMIT = 12
+    rt_small_streak = 0
+    # Backstop independent of drop size: SMW's varying drops (e.g. an
+    # occasional 9 amid 1s) reset rt_small_streak and slip past RT_STALL_LIMIT.
+    # With the freeze-exit-mx fix a healthy build needs only 1-2 ref-taint
+    # passes, so a total far above that (any churn at all) is non-convergence
+    # — abort cleanly rather than running to the wall-clock cap. Backstop, not
+    # the fix: the fix is freezing exit-(M,X) on ref-taint-only passes.
+    RT_TOTAL_LIMIT = 40
+    rt_total_passes = 0
+    # Rolling window of the last N reference-taint passes' fixpoint inputs,
+    # dumped to _refprune_snap_NNN.json. Lets a convergence fix be iterated
+    # OFFLINE (replay _propagate_reference_taint/_compute_prunable per pass),
+    # and — because it spans the run-up (e.g. 5,3,4,2,3) BEFORE the 1/pass
+    # onset — lets the replay start a few passes back to catch a
+    # pre-dependency that sets up the cycle.
+    RT_SNAP_WINDOW = 8
+
     for pass_idx in range(max_passes):
         _phase(f"emit_pass_{pass_idx}")
         # Clear any leftovers from prior session/process.
@@ -1691,13 +1748,94 @@ def main() -> int:
                 ref_prunable |= next_ref_prunable
             if not ref_prunable:
                 break
+            # ── Rolling fixpoint snapshot (offline-replay / fast test loop) ──
+            # Dump THIS pass's exact prune inputs before applying the drop,
+            # keeping only the last RT_SNAP_WINDOW. Each file is a resumable
+            # replay point (re-run _propagate_reference_taint/_compute_prunable
+            # against it); the window spans the pre-lock run-up so a fix can
+            # start a few passes back.
+            # Serialize by real type: variant ids are (addr, m, x) tuples
+            # (round-trip as [addr,m,x] lists); canonical_variants and
+            # bank_set are plain ints. _nm() is human-readable only and
+            # guards against non-tuples.
+            def _nm(v):
+                if not isinstance(v, tuple):
+                    return v
+                a, mm, xx = v
+                return f"bank_{(a >> 16) & 0xFF:02X}_{a & 0xFFFF:04X}_M{mm}X{xx}"
+
+            def _t(v):
+                return list(v) if isinstance(v, tuple) else v
+            _dangling = {}
+            for _v in ref_prunable:
+                for _e in ref_graph.get(_v, ()):
+                    if ((_e[0] >> 16) & 0xFF) in bank_set and _e not in emitted_now:
+                        _dangling.setdefault(_nm(_v), []).append(_nm(_e))
+            _snap = {
+                'pass_idx': pass_idx,
+                'dropped': sorted(_nm(v) for v in ref_prunable),
+                'dangling_edges': _dangling,
+                'ref_graph': [[_t(k), [_t(e) for e in vs]]
+                              for k, vs in ref_graph.items()],
+                'emitted_now': [_t(v) for v in emitted_now],
+                'cumulative_pruned': [_t(v) for v in cumulative_pruned],
+                'cumulative_dirty': [_t(v) for v in cumulative_dirty_variants],
+                'canonical': sorted(canonical_variants),
+                'bank_set': sorted(bank_set),
+            }
+            import json as _json, os as _os
+            with open(f'_refprune_snap_{pass_idx:03d}.json', 'w') as _fh:
+                _json.dump(_snap, _fh)
+            if pass_idx - RT_SNAP_WINDOW >= 0:
+                try:
+                    _os.remove(f'_refprune_snap_{pass_idx - RT_SNAP_WINDOW:03d}.json')
+                except OSError:
+                    pass
             cumulative_pruned |= ref_prunable
             valid_variants_map = _apply_variant_prune(
                 parsed, cumulative_pruned)
             print(f"  reference-taint prune: dropped {len(ref_prunable)} "
                   f"wrong-width caller clone(s) "
-                  f"({len(cumulative_pruned)} total); re-emitting")
+                  f"({len(cumulative_pruned)} total); re-emitting "
+                  f"[snap pass {pass_idx}, dropped={_snap['dropped']}]")
+            # Non-convergence guard: a healthy build resolves the dangling
+            # layers in a few passes. A tiny constant drop sustained over
+            # many passes is the ALttP-style lock (each re-emit re-exposes
+            # one layer) and never reaches ref_prunable == 0 -> bail before
+            # the wall-clock cap with an actionable diagnostic.
+            rt_total_passes += 1
+            if rt_total_passes >= RT_TOTAL_LIMIT:
+                print(f"\n!!! v2_regen ABORT: reference-taint prune ran "
+                      f"{rt_total_passes} passes without reaching a fixpoint "
+                      f"({len(cumulative_pruned)} total pruned). Drop-size-"
+                      f"independent backstop ({RT_TOTAL_LIMIT}) tripped — a "
+                      f"healthy build converges in 1-2 ref-taint passes. Last "
+                      f"{RT_SNAP_WINDOW} fixpoint snapshots: _refprune_snap_*."
+                      f"json — replay the prune offline; fix the cycle in the "
+                      f"recompiler, not here.",
+                      file=sys.stderr, flush=True)
+                sys.exit(3)
+            if len(ref_prunable) <= RT_SMALL_DROP:
+                rt_small_streak += 1
+            else:
+                rt_small_streak = 0
+            if rt_small_streak >= RT_STALL_LIMIT:
+                print(f"\n!!! v2_regen ABORT: reference-taint prune is NOT "
+                      f"converging — dropped <= {RT_SMALL_DROP} wrong-width "
+                      f"clone(s)/pass for {rt_small_streak} consecutive passes "
+                      f"({len(cumulative_pruned)} total) without reaching a "
+                      f"fixpoint. Non-terminating wrong-width-clone cycle (each "
+                      f"full re-emit re-exposes one dangling layer). Last "
+                      f"{RT_SNAP_WINDOW} fixpoint snapshots: _refprune_snap_*."
+                      f"json — replay the prune offline to iterate a fix; fix "
+                      f"the cycle in the recompiler, not here.",
+                      file=sys.stderr, flush=True)
+                sys.exit(3)
             # fall through -> exit-mx refresh -> loop re-emits
+        else:
+            # A pass that did real structural work (auto-promote add /
+            # emit-truth prune / variant discovery) — reset the stall streak.
+            rt_small_streak = 0
         # Auto-promoted callees did not exist when the earlier exit-M/X
         # autoroute ran. Refresh the auto-detected per-variant exit map
         # before the next emit pass so callers decode post-JSR/JSL code
