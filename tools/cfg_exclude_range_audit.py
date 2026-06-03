@@ -106,7 +106,10 @@ def main() -> int:
     p.add_argument('--limit', type=int, default=0)
     args = p.parse_args()
 
-    rom = load_rom(str(PARENT / 'smw.sfc'))
+    sfc_matches = sorted(PARENT.glob('*.sfc'))
+    if not sfc_matches:
+        raise SystemExit(f'no .sfc ROM found next to {PARENT}')
+    rom = load_rom(str(sfc_matches[0]))
     banks = [args.bank] if args.bank is not None else list(BANKS)
     all_results = []
     for bank in banks:

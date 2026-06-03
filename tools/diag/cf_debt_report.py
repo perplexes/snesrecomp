@@ -121,9 +121,13 @@ class Site:
 
 
 def bank_from_filename(path: str) -> str:
-    """smw_00_v2.c -> '00', smw_0c_v2.c -> '0C', etc."""
+    """<prefix>_00_v2.c -> '00', <prefix>_0c_v2.c -> '0C', etc.
+
+    Handles any game prefix (smw_/mmx_/zelda_/future) — the leading
+    prefix token is matched generically.
+    """
     name = os.path.basename(path)
-    m = re.match(r'smw_([0-9a-fA-F]{2})_v2\.c$', name)
+    m = re.match(r'\w+_([0-9a-fA-F]{2})_v2\.c$', name)
     if m:
         return m.group(1).upper()
     if name == 'unresolved_stubs_v2.c':
@@ -405,7 +409,7 @@ def format_detail(sites: List[Site], gen_dir: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--gen-dir', default='src/gen',
-                    help='Directory containing smw_XX_v2.c files')
+                    help='Directory containing <prefix>_XX_v2.c files')
     ap.add_argument('--stubs-file', default='src/gen/unresolved_stubs_v2.c',
                     help='Generated stubs file (defines no-op bodies)')
     ap.add_argument('--json', default=None,
@@ -421,8 +425,8 @@ def main() -> int:
                     help='[CALL_INDIRECT] detect CMP/CPX/AND/ASL bounds '
                          'patterns near each JSR (abs,X). Requires --rom '
                          'and --cfg-dir. Implies --with-asm.')
-    ap.add_argument('--rom', default='smw.sfc',
-                    help='Path to SMW ROM image (used by --with-asm/bounds)')
+    ap.add_argument('--rom', default=None,
+                    help='Path to the game ROM image (required for --with-asm/--with-bounds)')
     ap.add_argument('--cfg-dir', default='recomp', dest='cfg_dir',
                     help='Path to bankXX.cfg directory (used by '
                          '--with-asm/bounds for function entry lookup)')

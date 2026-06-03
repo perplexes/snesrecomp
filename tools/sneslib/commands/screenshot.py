@@ -37,7 +37,7 @@ def _snap(args):
     os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
     hwnd = find_smw_window(port=port)
     if not hwnd:
-        error(f'No SMW window found for {mode} (port {port})')
+        error(f'No recompiled-game window found for {mode} (port {port})')
     img = capture_window(hwnd)
     if not img:
         error('Failed to capture window')
@@ -58,14 +58,14 @@ def _capture(args):
 
     hwnd = find_smw_window(port=port)
     if not hwnd:
-        error(f'No SMW window found for {mode} (port {port})')
+        error(f'No recompiled-game window found for {mode} (port {port})')
 
     print(f'Capturing {args.count} screenshots from {mode} (port {port})...')
     for i in range(args.count):
         frame, func = get_frame(port)
         img = capture_window(hwnd)
         if img:
-            path = f'{out_dir}/smw_screenshot_{i}.png'
+            path = f'{out_dir}/screenshot_{i}.png'
             img.save(path)
             print(f'  [{i}] frame={frame} func={func} -> {path}')
         if i < args.count - 1:

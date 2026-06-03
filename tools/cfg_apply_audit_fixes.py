@@ -60,8 +60,9 @@ def collect_active_fixes() -> List[Tuple[int, int, int]]:
     """
     fixes: List[Tuple[int, int, int]] = []
     for bank in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x0c, 0x0d):
-        gp = GEN_DIR / f'smw_{bank:02x}_gen.c'
-        if not gp.exists(): continue
+        gen_matches = sorted(GEN_DIR.glob(f'*_{bank:02x}_gen.c'))
+        if not gen_matches: continue
+        gp = gen_matches[0]
         text = gp.read_text(encoding='utf-8', errors='ignore')
         symbols = _bank_symbols(bank)
         defs = []
