@@ -135,8 +135,45 @@ static void cb_video(const void* data, unsigned w, unsigned h, size_t pitch) {
     if (g_tex) SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr);
     SDL_RenderPresent(g_ren);
 }
-static void  cb_audio_sample(int16_t, int16_t) {}
-static size_t cb_audio_batch(const int16_t*, size_t frames) { return frames; }
+// ---- audio capture ----
+// Always-on WAV dump of everything the core outputs, from frame 0: the
+// ground-truth PCM for differential audio comparison against the recomp's
+// audio_trace ring (debug_server `audio_wav`). Header sizes are patched on
+// close; the sample rate comes from retro_get_system_av_info.
+static FILE*    g_wav;
+static uint64_t g_wav_sample_frames; // stereo frames written
+static uint32_t g_wav_rate = 32040;
+
+static void wav_open(const char* path, double rate) {
+    g_wav = fopen(path, "wb");
+    if (!g_wav) { fprintf(stderr, "cannot open %s\n", path); return; }
+    g_wav_rate = (uint32_t)(rate + 0.5);
+    uint8_t hdr[44] = {0};
+    fwrite(hdr, 1, 44, g_wav); // placeholder, patched in wav_close
+}
+static void wav_close() {
+    if (!g_wav) return;
+    uint32_t data_bytes = (uint32_t)(g_wav_sample_frames * 4);
+    uint32_t riff = 36 + data_bytes, fmt32 = 16, brate = g_wav_rate * 4;
+    uint16_t pcm = 1, ch = 2, balign = 4, bits = 16;
+    fseek(g_wav, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, g_wav); fwrite(&riff, 4, 1, g_wav);
+    fwrite("WAVEfmt ", 1, 8, g_wav);
+    fwrite(&fmt32, 4, 1, g_wav); fwrite(&pcm, 2, 1, g_wav); fwrite(&ch, 2, 1, g_wav);
+    fwrite(&g_wav_rate, 4, 1, g_wav); fwrite(&brate, 4, 1, g_wav);
+    fwrite(&balign, 2, 1, g_wav); fwrite(&bits, 2, 1, g_wav);
+    fwrite("data", 1, 4, g_wav); fwrite(&data_bytes, 4, 1, g_wav);
+    fclose(g_wav); g_wav = nullptr;
+    printf("[wav closed: %llu frames @ %u Hz]\n",
+           (unsigned long long)g_wav_sample_frames, g_wav_rate);
+}
+static void  cb_audio_sample(int16_t l, int16_t r) {
+    if (g_wav) { int16_t s[2] = {l, r}; fwrite(s, 4, 1, g_wav); g_wav_sample_frames++; }
+}
+static size_t cb_audio_batch(const int16_t* data, size_t frames) {
+    if (g_wav && data && frames) { fwrite(data, 4, frames, g_wav); g_wav_sample_frames += frames; }
+    return frames;
+}
 static void  cb_input_poll(void) {}
 
 static int16_t cb_input_state(unsigned port, unsigned device, unsigned index, unsigned id) {
@@ -249,6 +286,14 @@ int main(int argc, char** argv) {
     int vw=(int)av.geometry.base_width, vh=(int)av.geometry.base_height;
     if(vw<=0)vw=256; if(vh<=0)vh=224;
 
+    printf("core timing: fps=%.4f sample_rate=%.2f\n", av.timing.fps, av.timing.sample_rate);
+    { const char* wp = getenv("SNESREF_WAV");
+      wav_open(wp && wp[0] ? wp : "snesref_audio.wav",
+               av.timing.sample_rate > 0 ? av.timing.sample_rate : 32040.0); }
+    long quit_frames = 0;
+    { const char* qf = getenv("SNESREF_QUIT_FRAMES");
+      if (qf && qf[0]) quit_frames = atol(qf); }
+
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) { fprintf(stderr,"SDL_Init: %s\n",SDL_GetError()); return 5; }
     open_first_pad();
@@ -284,6 +329,7 @@ int main(int argc, char** argv) {
         p_retro_run();
         g_frame++;
         trace_tick();
+        if (quit_frames > 0 && g_frame >= (uint32_t)quit_frames) running = false;
         // headless self-test: MMX_SELFTEST=1 -> save@200, load@400, quit@600
         { static int st=-1; if(st<0){const char*v=getenv("MMX_SELFTEST"); st=(v&&v[0]&&v[0]!='0')?1:0;}
           if(st){ if(g_frame==200){printf("[selftest] saving slot9 @f200\n");fflush(stdout);save_state(9);}
@@ -300,6 +346,7 @@ int main(int argc, char** argv) {
         }
     }
     if (g_log) fflush(g_log);
+    wav_close();
     p_retro_unload_game(); p_retro_deinit();
     SDL_Quit(); FreeLibrary(g_core);
     return 0;

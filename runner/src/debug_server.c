@@ -1035,11 +1035,11 @@ void debug_on_block_enter(uint32_t pc, uint32_t a, uint32_t x, uint32_t y) {
     // index even when the block trace itself isn't being recorded.
     g_block_counter++;
 
-    // APU pacing: bump the main-CPU cycle estimate. Average ~24 cycles
-    // per basic block (each block is typically 3-5 65816 instructions
-    // averaging ~6 cycles each). RtlApuWrite / snes_readBBus use this
-    // counter to drive realistic snes_catchupApu() so SMW's "wait for
-    // APU ack" loops actually wait. Plain unsigned add, no branch.
+    // Main-CPU cycle estimate: ~24 cycles per basic block (typically
+    // 3-5 65816 instructions averaging ~6 cycles each). Used for trace
+    // timestamps and diagnostics. APU catch-up pacing deliberately does
+    // NOT read this counter any more — it paces from APU-port touches
+    // only (g_apu_pace_cycles_estimate, see common_rtl.c, issue #4).
     g_main_cpu_cycles_estimate += 24;
 
     // Tier 3 WRAM anchors: snapshot full WRAM every N blocks when armed.
@@ -5844,8 +5844,108 @@ static void cmd_get_rtstrace(const char *args) {
     send_line(buf);
 }
 
+/* ---- Audio observability (always-on rings in audio_trace.c) ---- */
+#include "audio_trace.h"
+
+/* audio_stats — counters + the most recent per-second snapshots.
+ * Args: [snap_count=30] */
+static void cmd_audio_stats(const char *args) {
+    int want = 30;
+    sscanf(args, "%d", &want);
+    if (want < 0) want = 0;
+    if (want > 256) want = 256;
+    AudioTraceStats st;
+    audio_trace_get_stats(&st);
+    static char buf[65536];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"produced\":%llu,\"produced_cpu\":%llu,\"produced_audio\":%llu,"
+        "\"dropped\":%llu,\"drop_runs\":%llu,\"consumed\":%llu,\"consume_calls\":%llu,"
+        "\"reg_writes\":%llu,\"kon_writes\":%llu,\"occupancy_highwater\":%u,"
+        "\"pace_baseline_cycles\":%llu,\"pace_accumulate_calls\":%llu,"
+        "\"pace_consumer_active\":%u,"
+        "\"event_count\":%llu,\"snap_count\":%llu,\"snaps\":[",
+        (unsigned long long)st.produced, (unsigned long long)st.produced_cpu,
+        (unsigned long long)st.produced_audio, (unsigned long long)st.dropped,
+        (unsigned long long)st.drop_runs, (unsigned long long)st.consumed,
+        (unsigned long long)st.consume_calls, (unsigned long long)st.reg_writes,
+        (unsigned long long)st.kon_writes, st.occupancy_highwater,
+        (unsigned long long)st.pace_baseline_cycles,
+        (unsigned long long)st.pace_accumulate_calls, st.pace_consumer_active,
+        (unsigned long long)st.event_count, (unsigned long long)st.snap_count);
+    uint64_t first = st.snap_count > (uint64_t)want ? st.snap_count - want : 0;
+    static AudioTraceSnap snaps[256];
+    uint64_t oldest = 0;
+    uint32_t n = audio_trace_copy_snaps(first, (uint32_t)want, snaps, &oldest);
+    for (uint32_t i = 0; i < n && pos < (int)sizeof(buf) - 256; i++) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"ms\":%llu,\"prod\":%llu,\"drop\":%llu,\"cons\":%llu,\"occ\":%u}",
+            i ? "," : "", (unsigned long long)snaps[i].wall_ms,
+            (unsigned long long)snaps[i].produced,
+            (unsigned long long)snaps[i].dropped,
+            (unsigned long long)snaps[i].consumed, snaps[i].occupancy);
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+}
+
+/* audio_events — DSP reg writes / drop runs / consume events.
+ * Args: <first_idx> [max=2000] [reg_only=0] */
+static void cmd_audio_events(const char *args) {
+    unsigned long long first = 0; int max = 2000, reg_only = 0;
+    sscanf(args, "%llu %d %d", &first, &max, &reg_only);
+    if (max < 1) max = 1;
+    if (max > 8000) max = 8000;
+    static AudioTraceEvent ev[8000];
+    uint64_t oldest = 0;
+    uint32_t n = audio_trace_copy_events(first, (uint32_t)max, ev, &oldest);
+    static char buf[1048576];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"oldest\":%llu,\"first\":%llu,\"events\":[",
+        (unsigned long long)oldest,
+        (unsigned long long)(first < oldest ? oldest : first));
+    static const char *tn[] = { "?", "reg", "drop", "consume" };
+    int emitted = 0;
+    for (uint32_t i = 0; i < n && pos < (int)sizeof(buf) - 256; i++) {
+        int t = ev[i].type;
+        if (t < 1 || t > 3) t = 0;
+        if (reg_only && t != AUDIO_TRACE_EV_REG) continue;
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"s\":%llu,\"t\":\"%s\",\"adr\":\"0x%02x\",\"val\":\"0x%02x\","
+            "\"aux\":%u,\"p\":%u}",
+            emitted ? "," : "", (unsigned long long)ev[i].sample_idx, tn[t],
+            ev[i].addr, ev[i].val, ev[i].aux, ev[i].producer);
+        emitted++;
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "],\"returned\":%d,\"scanned\":%u}",
+             emitted, n);
+    send_line(buf);
+}
+
+/* audio_wav — dump a PCM-ring slice as a WAV file (server-side write).
+ * Args: <path> [start_idx=-1 (oldest)] [count=0 (all)] */
+static void cmd_audio_wav(const char *args) {
+    char path[512] = {0};
+    long long start = -1;
+    unsigned long long count = 0;
+    if (sscanf(args, "%511s %lld %llu", path, &start, &count) < 1 || !path[0]) {
+        send_fmt("{\"error\":\"usage: audio_wav <path> [start_idx] [count]\"}");
+        return;
+    }
+    uint64_t out_start = 0, out_count = 0;
+    if (audio_trace_dump_wav(path, (int64_t)start, (uint64_t)count,
+                             &out_start, &out_count) != 0) {
+        send_fmt("{\"error\":\"cannot write %s\"}", path);
+        return;
+    }
+    send_fmt("{\"ok\":true,\"path\":\"%s\",\"start\":%llu,\"count\":%llu}",
+             path, (unsigned long long)out_start, (unsigned long long)out_count);
+}
+
 typedef struct { const char *name; void (*handler)(const char *args); } CmdEntry;
 static const CmdEntry s_commands[] = {
+    {"audio_stats",   cmd_audio_stats},
+    {"audio_events",  cmd_audio_events},
+    {"audio_wav",     cmd_audio_wav},
     {"ping",          cmd_ping},
     {"oamblk_range",  cmd_oamblk_range},
     {"get_oamblk",    cmd_get_oamblk},

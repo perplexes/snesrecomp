@@ -24,6 +24,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/keybinds.c
     ${SNESRECOMP_RUNNER_ROOT}/src/cpu_state.c
     ${SNESRECOMP_RUNNER_ROOT}/src/cpu_trace.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/audio_trace.c
     ${SNESRECOMP_RUNNER_ROOT}/src/util.c
     # SNES hardware model
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/apu.c
