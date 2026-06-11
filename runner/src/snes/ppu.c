@@ -65,6 +65,18 @@ void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
   ppu->extraRightCur = extra;
 }
 
+void PpuSetExtraSpaceCentered(Ppu *ppu, uint8_t budget) {
+  if (budget > kPpuExtraLeftRight)
+    budget = kPpuExtraLeftRight;
+  // Render only the authentic 256 columns but keep the centering budget so the
+  // composite places them in the middle of the wider framebuffer (the caller
+  // clears the side margins to black -> letterbox/pillarbox). Used for bounded
+  // screens (overworld, title) where there is no valid BG past 256 to show.
+  ppu->extraLeftRight = budget;
+  ppu->extraLeftCur = 0;
+  ppu->extraRightCur = 0;
+}
+
 bool ppu_checkOverscan(Ppu* ppu) {
   // called at (0,225)
   ppu->frameOverscan = PPU_overscan(ppu); // set if we have a overscan-frame
@@ -784,7 +796,16 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
       // in y-range, get the x location, using the high bit as well
       int x = ppu->oam[index] & 0xff;
       x |= ((ppu->highOam[index >> 3] >> (index & 7)) & 1) << 8;
-      if(x > 255) x -= 512;
+      // SNES OAM x is 9-bit; values >255 normally wrap to negative so sprites
+      // can straddle the LEFT edge. In widescreen that wrap would also pull
+      // legitimate right-margin sprites (screen x 256..) to the left, hiding
+      // them. SMW already emits OAM for sprites out to screen x ~320 (its
+      // GetDrawInfo draw window is [-64,320)), so push the wrap boundary past
+      // the active right border: values in [256, 256+extraRightCur) stay
+      // positive (right margin); [256+extraRightCur, 512) still wrap to the
+      // left straddle range. With extraRightCur==0 this is the authentic
+      // `if (x > 255) x -= 512`.
+      if (x >= 256 + ppu->extraRightCur) x -= 512;
       // if in x-range
       if(x > -spriteSize) {
         // break if we found 32 sprites already

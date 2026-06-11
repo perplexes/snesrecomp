@@ -241,6 +241,11 @@ void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_fl
 // extraRightCur/extraLeftRight machinery used by the line renderer.
 void PpuSetExtraSpace(Ppu *ppu, uint8_t extra);
 
+// Render authentic 256-wide content centered within a `budget`-per-side wider
+// framebuffer (no border columns drawn). For bounded screens; caller blacks
+// out the side margins to pillarbox.
+void PpuSetExtraSpaceCentered(Ppu *ppu, uint8_t budget);
+
 int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags);
 
 #endif
