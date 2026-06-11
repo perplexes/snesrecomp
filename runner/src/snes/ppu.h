@@ -26,14 +26,23 @@ typedef struct BgLayer {
 
 enum {
   kPpuXPixels = 256,
-  kPpuExtraLeftRight = 0,
+  // Maximum widescreen expansion *per side*, baked into the priority-buffer
+  // capacity. This is a compile-time ceiling only; the actual extra columns
+  // rendered each frame are the runtime ppu->extraLeftCur/extraRightCur, which
+  // default to 0 (authentic 256-wide output). 96 per side allows up to a
+  // 448-pixel internal width, comfortably past 16:9 at 224 lines.
+  kPpuExtraLeftRight = 96,
+  // Full internal width of the priority buffers (logical 256 + both borders).
+  kPpuBufWidth = kPpuXPixels + kPpuExtraLeftRight * 2,
 };
 
 typedef uint16_t PpuZbufType;
 
 typedef struct PpuPixelPrioBufs {
   // This holds the prio in the upper 8 bits and the color in the lower 8 bits.
-  PpuZbufType data[kPpuXPixels];
+  // Sized for the widescreen border; logical screen x maps to
+  // data[x + kPpuExtraLeftRight].
+  PpuZbufType data[kPpuBufWidth];
 } PpuPixelPrioBufs;
 
 enum {
@@ -225,6 +234,12 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr);
 void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val);
 void ppu_saveload(Ppu *ppu, SaveLoadInfo *sli);
 void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_flags);
+
+// Set the symmetric widescreen border, in pixels per side (clamped to
+// kPpuExtraLeftRight). 0 restores authentic 256-wide rendering. The internal
+// render width becomes 256 + 2*extra. Drives the dormant extraLeftCur/
+// extraRightCur/extraLeftRight machinery used by the line renderer.
+void PpuSetExtraSpace(Ppu *ppu, uint8_t extra);
 
 int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags);
 

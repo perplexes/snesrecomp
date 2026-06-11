@@ -54,6 +54,17 @@ void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_fl
   ppu->renderBuffer = pixels;
 }
 
+void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
+  if (extra > kPpuExtraLeftRight)
+    extra = kPpuExtraLeftRight;
+  // Symmetric border: equal columns added on each side. extraLeftRight is the
+  // centering budget; extraLeftCur/extraRightCur are the per-side columns the
+  // window/sprite/composite paths actually render.
+  ppu->extraLeftRight = extra;
+  ppu->extraLeftCur = extra;
+  ppu->extraRightCur = extra;
+}
+
 bool ppu_checkOverscan(Ppu* ppu) {
   // called at (0,225)
   ppu->frameOverscan = PPU_overscan(ppu); // set if we have a overscan-frame
@@ -73,6 +84,15 @@ void ppu_handleVblank(Ppu* ppu) {
 static inline void ClearBackdrop(PpuPixelPrioBufs *buf) {
   for (size_t i = 0; i != arraysize(buf->data); i += 4)
     *(uint64*)&buf->data[i] = 0x0500050005000500;
+}
+
+// mosaicModulo is sized for the logical 256-wide screen, but widescreen window
+// edges can fall in the border (negative on the left, >=256 on the right).
+// Clamp the lookup so the rare mosaic+widescreen combination stays in-bounds;
+// border mosaic alignment is approximate but never reads out of range. With
+// extra==0 (authentic) every index is already in [0,256), so this is a no-op.
+static inline uint8 PpuMosaicAt(Ppu *ppu, int i) {
+  return ppu->mosaicModulo[(unsigned)i < (unsigned)kPpuXPixels ? i : (i < 0 ? 0 : kPpuXPixels - 1)];
 }
 
 void ppu_runLine(Ppu* ppu, int line) {
@@ -421,7 +441,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu, uint y, bool sub, uint layer
     const uint16 *tp_last = tps[x >> 8 & 1] + 31, *tp_next = tps[(x >> 8 & 1) ^ 1];
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
-    int w = mosaic_size - (sx - ppu->mosaicModulo[sx]);
+    int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = *tp;
@@ -480,7 +500,7 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, int y, bool sub, uint layer,
     const uint16 *tp_last = tps[x >> 8 & 1] + 31, *tp_next = tps[(x >> 8 & 1) ^ 1];
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
-    int w = mosaic_size - (sx - ppu->mosaicModulo[sx]);
+    int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = *tp;
@@ -547,7 +567,7 @@ static void PpuDrawBackground_mode7(Ppu *ppu, uint y, bool sub, PpuZbufType z) {
     uint32 outside_value = PPU_m7largeField(ppu) ? 0x3ffff : 0xffffffff;
     bool char_fill = PPU_m7charFill(ppu);
     if (mosaic_enabled) {
-      int w = PPU_mosaicSize(ppu) - (x - ppu->mosaicModulo[x]);
+      int w = PPU_mosaicSize(ppu) - (x - PpuMosaicAt(ppu, x));
       do {
         w = IntMin(w, dstz_end - dstz);
         if ((uint32)(xpos | ypos) > outside_value) {
@@ -788,7 +808,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
         PpuZbufType z = paletteBase + (prio << 8);
 
         for(int col = 0; col < spriteSize; col += 8) {
-          if(col + x > -8 && col + x < 256) {
+          if(col + x > -8 - ppu->extraLeftCur && col + x < 256 + ppu->extraRightCur) {
             // break if we found 34 8*1 slivers already
             tilesFound++;
             if(tilesFound > 34) {
