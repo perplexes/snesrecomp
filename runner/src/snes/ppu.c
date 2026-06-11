@@ -351,12 +351,16 @@ static void PpuDrawBackground_2bpp(Ppu *ppu, uint y, bool sub, uint layer, PpuZb
   // border edge, a transparent gap, the centered chunk, a gap, and the
   // right chunk re-anchored to the right border edge. ws_bias shifts each
   // drawn span's source x so the chunks keep sampling their authentic
-  // tilemap columns. Skipped when the layer is windowed (split + game
-  // windows don't compose; fall back to authentic centered).
+  // tilemap columns. Applied only when the computed window set is one
+  // full drawn span: games (SMW) often enable screen-level window masking
+  // ($212E) with no window selected for the layer, which still routes
+  // through PpuWindows_Calc but degenerates to a single span. An actual
+  // window shape (e.g. the level-start iris) keeps the authentic centered
+  // HUD for those frames — split + real windows don't compose.
   int16 ws_bias[6] = { 0, 0, 0, 0, 0, 0 };
   if (layer == 2 && y < ppu->wsHudSplitHeight &&
       ppu->extraLeftCur && ppu->extraRightCur &&
-      !IS_SCREEN_WINDOWED(ppu, sub, layer)) {
+      win.nr == 1 && win.bits == 0) {
     win.nr = 5;
     win.bits = 0x0A;  // spans 1 and 3 are the gaps
     win.edges[0] = -ppu->extraLeftCur;
