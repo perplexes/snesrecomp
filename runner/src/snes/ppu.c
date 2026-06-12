@@ -98,6 +98,10 @@ void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
   ppu->wsHudRightStart = right_start;
 }
 
+void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y) {
+  ppu->wsBg3WidenY = from_y;
+}
+
 bool ppu_checkOverscan(Ppu* ppu) {
   // called at (0,225)
   ppu->frameOverscan = PPU_overscan(ppu); // set if we have a overscan-frame
@@ -178,21 +182,31 @@ typedef struct PpuWindows {
   uint8 bits;
 } PpuWindows;
 
-static void PpuWindows_Clear(PpuWindows *win, Ppu *ppu, uint layer) {
-  win->edges[0] = -(layer != 2 ? ppu->extraLeftCur : 0);
-  win->edges[1] = 256 + (layer != 2 ? ppu->extraRightCur : 0);
+// Per-layer widescreen side margin. BG3 (layer 2) carries the HUD and is
+// clamped to the authentic 256-wide region so a BG3 status bar never tiles into
+// the margins -- EXCEPT on scanlines >= wsBg3WidenY, where the game renders
+// level content on BG3 (e.g. SMW water) that should fill 16:9 like BG1/BG2.
+static inline int PpuLayerExtra(Ppu *ppu, uint layer, int y, int extra) {
+  if (layer != 2)
+    return extra;
+  return (ppu->wsBg3WidenY && y >= ppu->wsBg3WidenY) ? extra : 0;
+}
+
+static void PpuWindows_Clear(PpuWindows *win, Ppu *ppu, uint layer, int y) {
+  win->edges[0] = -PpuLayerExtra(ppu, layer, y, ppu->extraLeftCur);
+  win->edges[1] = 256 + PpuLayerExtra(ppu, layer, y, ppu->extraRightCur);
   win->nr = 1;
   win->bits = 0;
 }
 
-static void PpuWindows_Calc(PpuWindows *win, Ppu *ppu, uint layer) {
+static void PpuWindows_Calc(PpuWindows *win, Ppu *ppu, uint layer, int y) {
   // Evaluate which spans to render based on the window settings.
   // There are at most 5 windows.
   // Algorithm from Snes9x
   uint32 winflags = GET_WINDOW_FLAGS(ppu, layer);
   uint nr = 1;
-  int window_right = 256 + (layer != 2 ? ppu->extraRightCur : 0);
-  win->edges[0] = - (layer != 2 ? ppu->extraLeftCur : 0);
+  int window_right = 256 + PpuLayerExtra(ppu, layer, y, ppu->extraRightCur);
+  win->edges[0] = -PpuLayerExtra(ppu, layer, y, ppu->extraLeftCur);
   win->edges[1] = window_right;
   uint i, j;
   int t;
@@ -259,7 +273,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, uint y, bool sub, uint layer, PpuZb
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   y += ppu->vScroll[layer];
   int sc_offs = PPU_bgTilemapAdr(ppu, layer) + (((y >> 3) & 0x1f) << 5);
   if ((y & 0x100) && PPU_bgTilemapHigher(ppu, layer))
@@ -356,7 +370,7 @@ static void PpuDrawBackground_2bpp(Ppu *ppu, uint y, bool sub, uint layer, PpuZb
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   // Widescreen HUD split (PpuSetWidescreenHudSplit): on HUD scanlines,
   // replace the single span with five — left chunk re-anchored to the left
   // border edge, a transparent gap, the centered chunk, a gap, and the
@@ -479,7 +493,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu, uint y, bool sub, uint layer
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   y = ppu->mosaicModulo[y] + ppu->vScroll[layer];
   int sc_offs = PPU_bgTilemapAdr(ppu, layer) + (((y >> 3) & 0x1f) << 5);
   if ((y & 0x100) && PPU_bgTilemapHigher(ppu, layer))
@@ -538,7 +552,7 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, int y, bool sub, uint layer,
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   y = ppu->mosaicModulo[y] + ppu->vScroll[layer];
   int sc_offs = PPU_bgTilemapAdr(ppu, layer) + (((y >> 3) & 0x1f) << 5);
   if ((y & 0x100) && PPU_bgTilemapHigher(ppu, layer))
@@ -595,7 +609,7 @@ static void PpuDrawBackground_mode7(Ppu *ppu, uint y, bool sub, PpuZbufType z) {
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
 
   // expand 13-bit values to signed values
   int hScroll = ((int16_t)(ppu->m7matrix[6] << 3)) >> 3;
@@ -666,7 +680,7 @@ static void PpuDrawSprites(Ppu *ppu, uint y, uint sub, bool clear_backdrop) {
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
   PpuWindows win;
-  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer) : PpuWindows_Clear(&win, ppu, layer);
+  IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   for (size_t windex = 0; windex < win.nr; windex++) {
     if (win.bits & (1 << windex))
       continue;  // layer is disabled for this window part
@@ -755,7 +769,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
 
   // Color window affects the drawing mode in each region
   PpuWindows cwin;
-  PpuWindows_Calc(&cwin, ppu, 5);
+  PpuWindows_Calc(&cwin, ppu, 5, y);
   static const uint8 kCwBitsMod[8] = {
     0x00, 0xff, 0xff, 0x00,
     0xff, 0x00, 0xff, 0x00,

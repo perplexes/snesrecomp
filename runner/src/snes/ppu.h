@@ -142,6 +142,12 @@ struct Ppu {
   uint8_t extraLeftCur, extraRightCur, extraLeftRight, extraBottomCur;
   // Widescreen HUD split (see PpuSetWidescreenHudSplit). 0 height = off.
   uint8_t wsHudSplitHeight, wsHudLeftEnd, wsHudRightStart;
+  // Widescreen BG3 widen (see PpuSetWidescreenBg3Widen). Scanlines >= this let
+  // BG3 (layer 2) extend into the side margins like BG1/BG2 instead of staying
+  // clamped to the authentic 256-wide region. 0 = off (BG3 clamped everywhere,
+  // so a BG3 status bar never tiles into the margins). SMW sets it to the HUD
+  // band height so water/level content on BG3 below the bar fills 16:9.
+  uint8_t wsBg3WidenY;
   uint8_t lastMosaicModulo;
   uint8_t lastBrightnessMult;
   bool lineHasSprites;
@@ -270,6 +276,13 @@ void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom);
 // setters, callers re-apply per frame (ppu_reset zeroes the fields).
 void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
                               uint8_t right_start);
+
+// Let BG3 (layer 2) render into the widescreen side margins on scanlines
+// >= from_y, instead of being clamped to the authentic 256-wide region. Pass
+// the HUD band height so the status bar above it stays clamped (or split) while
+// level content on BG3 below it (e.g. SMW water) fills 16:9. from_y 0 = off.
+// Like the other widescreen setters, callers re-apply per frame.
+void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y);
 
 int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags);
 

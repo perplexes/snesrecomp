@@ -8,8 +8,8 @@
 // Shared widescreen frontend asset (game-agnostic).
 //
 // The PPU-level *capability* lives in snes/ppu.c: PpuSetExtraSpace /
-// PpuSetExtraSpaceCentered / PpuSetExtraSideSpace / PpuSetWidescreenHudSplit,
-// all inert at the default (0 margin). This file owns the small pieces of the
+// PpuSetExtraSpaceCentered / PpuSetExtraSideSpace / PpuSetWidescreenHudSplit /
+// PpuSetWidescreenBg3Widen, all inert at the default (0 margin). This file owns the small pieces of the
 // frontend that are byte-identical across every title that opts in, so they
 // live in one place instead of being copy-pasted into each game's main.c:
 //
