@@ -412,7 +412,7 @@ int snesrecomp_launcher_resolve_rom_sha256_multi(int argc, char **argv,
         }
         if (n_hashes && rom_sha256_match(out_path, hashes, n_hashes) < 0)
             fprintf(stderr, "[Launcher] Warning: '%s' is not a recognized ROM "
-                            "for this build — loading anyway; the game may "
+                            "for this build - loading anyway; the game may "
                             "misbehave.\n", out_path);
         rom_cfg_write(out_path);
         printf("[Launcher] ROM: %s\n", out_path);
@@ -441,7 +441,7 @@ int snesrecomp_launcher_resolve_rom_sha256_multi(int argc, char **argv,
         fclose(probe);
         if (n_hashes && rom_sha256_match(out_path, hashes, n_hashes) < 0)
             fprintf(stderr, "[Launcher] Warning: '%s' is not a recognized ROM "
-                            "for this build — loading anyway; the game may "
+                            "for this build - loading anyway; the game may "
                             "misbehave.\n", out_path);
         rom_cfg_write(out_path);
         printf("[Launcher] ROM: %s\n", out_path);
