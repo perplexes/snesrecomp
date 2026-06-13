@@ -9,7 +9,15 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>   /* FindFirstFileA / FindNextFileA — MSVC has no <dirent.h> */
+#else
 #include <dirent.h>
+#endif
+
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
 
 /* The audio thread already holds this around RtlRenderAudio; the CPU
  * thread takes it for register accesses. SDL mutexes are recursive, so
@@ -101,27 +109,47 @@ static void msu_resolve_base_if_dir(void) {
     size_t dlen = strlen(dir);
     while (dlen && (dir[dlen-1] == '/' || dir[dlen-1] == '\\')) dir[--dlen] = '\0';
 
-    DIR *d = opendir(dir);
-    if (!d) return;
-
-    /* Tally candidate bases; keep the one backing the most tracks. */
+    /* Tally candidate bases; keep the one backing the most tracks. The
+     * directory enumeration is the only platform-specific part — MSVC has no
+     * <dirent.h>, so Windows uses FindFirstFileA/FindNextFileA. The per-entry
+     * tally below is shared. */
     struct { char base[MSU1_PATH_MAX]; int count; } cand[16];
     int ncand = 0;
-    struct dirent *ent;
     char nb[MSU1_PATH_MAX];
+
+#ifdef _WIN32
+    char pat[MSU1_PATH_MAX];
+    snprintf(pat, sizeof(pat), "%s\\*", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const char *name = fd.cFileName;
+#else
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
-        if (!msu_match_track_name(ent->d_name, nb, sizeof(nb))) continue;
-        int found = 0;
-        for (int k = 0; k < ncand; k++) {
-            if (strcmp(cand[k].base, nb) == 0) { cand[k].count++; found = 1; break; }
+        const char *name = ent->d_name;
+#endif
+        if (msu_match_track_name(name, nb, sizeof(nb))) {
+            int found = 0;
+            for (int k = 0; k < ncand; k++) {
+                if (strcmp(cand[k].base, nb) == 0) { cand[k].count++; found = 1; break; }
+            }
+            if (!found && ncand < 16) {
+                strcpy(cand[ncand].base, nb);
+                cand[ncand].count = 1;
+                ncand++;
+            }
         }
-        if (!found && ncand < 16) {
-            strcpy(cand[ncand].base, nb);
-            cand[ncand].count = 1;
-            ncand++;
-        }
+#ifdef _WIN32
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
     }
     closedir(d);
+#endif
 
     int best = -1;
     for (int k = 0; k < ncand; k++)
