@@ -88,6 +88,35 @@ To keep new games consistent and free of leftover game-specific naming:
   diffing the recompiled build (also published standalone as
   [`mstan/snesref`](https://github.com/mstan/snesref); formerly `mmxref`).
 
+## MSU-1 audio
+
+The runner implements the [MSU-1](https://sneslab.net/wiki/MSU1)
+coprocessor (near's spec): the `$2000-$2007` registers, the `.msu` data
+channel, and 44.1 kHz stereo PCM track streaming mixed on top of the
+S-DSP output. It's a shared runtime feature, so it works for any game.
+
+**Default-OFF and byte-identical** when no pack is present — the `$2000`
+range reads back as open bus exactly as before, so non-MSU builds are
+unaffected.
+
+**Using it** — point `SNESRECOMP_MSU1` at an MSU pack:
+
+```sh
+# A folder: the pack base name is auto-detected from the *-<N>.pcm files
+SNESRECOMP_MSU1=/path/to/msu_pack ./game rom.sfc
+
+# …or an explicit base prefix (resolves <prefix>-<N>.pcm + <prefix>.msu)
+SNESRECOMP_MSU1=/path/to/msu_pack/alttp_msu ./game rom.sfc
+```
+
+A pack is the usual set of `<name>-<N>.pcm` files (each an `MSU1` header +
+44.1 kHz signed-16 stereo PCM); header-less raw PCM is also accepted.
+
+**Game side** — the chip is inert until a ROM drives it. Vanilla ROMs
+have no MSU-1 driver, so a game must be recompiled from an MSU-1-patched
+ROM (e.g. ALttP via qwertymodo's patch + a `bank22.cfg`). See
+[`docs/MSU1.md`](docs/MSU1.md) for the full integration write-up.
+
 ## Public API / docs
 
 There isn't a public API yet, and there aren't user-facing docs.

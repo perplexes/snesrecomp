@@ -5,6 +5,7 @@
 #include "recomp_hw.h"
 #include "snes/cpu.h"
 #include "snes/snes.h"
+#include "snes/msu1.h"
 #include "util.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -20,6 +21,11 @@ const RtlGameInfo *g_rtl_game_info;
 
 void RtlRegisterGame(const RtlGameInfo *info) {
   g_rtl_game_info = info;
+  /* Arm MSU-1 from the environment for every game, with no per-game
+   * wiring. Inert (default-OFF) unless SNESRECOMP_MSU1 is set. A game's
+   * main.c may additionally call msu1_set_rom_path() to enable the
+   * "auto" base-from-ROM-name mode. */
+  msu1_init();
 }
 
 uint8_t *SnesRomPtr(uint32 v) {

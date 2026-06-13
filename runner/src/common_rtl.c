@@ -8,6 +8,7 @@
 #include "snes/snes.h"
 #include "snes/apu.h"
 #include "snes/cart.h"
+#include "snes/msu1.h"
 #include "cpu_state.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -223,6 +224,13 @@ static int _writereg_ppu_count = 0;
 static int _writereg_dma_count = 0;
 void WriteReg(uint16 reg, uint8 value) {
   // Direct dispatch — bypass emulator bus
+  // MSU-1 ($2000-$2007). Inert unless a pack is armed, so the open-bus
+  // default (no-op + log) is preserved byte-for-byte when disabled.
+  if (reg >= 0x2000 && reg < 0x2008) {
+    if (msu1_enabled()) msu1_write(reg, value);
+    debug_server_on_reg_write(reg, value);
+    return;
+  }
   if (reg >= 0x2100 && reg < 0x2140) {
     ppu_write(g_ppu, reg & 0xff, value);
   } else if (reg >= 0x2140 && reg < 0x2180) {
@@ -242,6 +250,11 @@ void WriteReg(uint16 reg, uint8 value) {
 
 uint8 ReadReg(uint16 reg) {
   // Direct dispatch — bypass emulator bus
+  // MSU-1 ($2000-$2007). Returns 0 (open bus) when no pack is armed,
+  // matching the prior fall-through behaviour exactly.
+  if (reg >= 0x2000 && reg < 0x2008) {
+    return msu1_enabled() ? msu1_read(reg) : 0;
+  }
   if (reg >= 0x2100 && reg < 0x2140) {
     return ppu_read(g_ppu, reg & 0xff);
   } else if (reg >= 0x2140 && reg < 0x2180) {
@@ -569,6 +582,11 @@ void RtlRenderAudio(int16 *audio_buffer, int samples, int channels) {
   #undef DSP_AVAIL
   RtlApuLock();
   dsp_getSamples(g_snes->apu->dsp, audio_buffer, samples);
+  /* Mix MSU-1 streaming audio on top of the S-DSP block. Inert (no-op)
+   * unless a pack is armed and a track is playing. Runs under the APU
+   * lock we already hold, which serialises it against MSU register
+   * writes on the CPU thread (msu1_read/msu1_write take the same lock). */
+  msu1_mix(audio_buffer, samples);
   RtlApuUnlock();
 }
 
