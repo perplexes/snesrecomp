@@ -7,8 +7,12 @@
 #include "launcher_gui.h"
 
 #include <RmlUi/Core.h>
+#include <RmlUi/Core/Elements/ElementFormControlSelect.h>
 #include "RmlUi_Renderer_GL3.h"
 #include "RmlUi_Platform_SDL.h"
+
+#include <functional>
+#include <memory>
 
 #include <SDL.h>
 
@@ -194,6 +198,9 @@ bool msu_pack_present(const std::string& dir) {
     return false;
 }
 
+// One entry in a controller-source dropdown: a stable token + display label.
+struct SrcOption { Rml::String value; Rml::String label; };
+
 // ----------------------------------------------------------------------------
 // View model — every variable bound to the RML data model.
 // ----------------------------------------------------------------------------
@@ -224,6 +231,9 @@ struct Model {
     Rml::String p1_src_label = "Keyboard", p2_src_label = "Gamepad";
     Rml::String p1_status = "Enabled", p2_status = "Enabled";
     bool p1_enabled = true, p2_enabled = true;
+    // Real <select> dropdowns: per-player option lists + the selected token.
+    std::vector<SrcOption> p1_options, p2_options;
+    Rml::String p1_src_value = "kbd", p2_src_value = "none";
 
     bool save_found = false;
     Rml::String save_file = "(none)", save_size = "0 KB";
@@ -254,6 +264,29 @@ std::vector<std::string> enumerate_pads() {
         names.emplace_back(nm && *nm ? nm : "Controller");
     }
     return names;
+}
+
+// Build a player's dropdown options: None, Keyboard, and that player's connected
+// controller (port p -> pad p) if present. value is the stable token the change
+// handler decodes back into an InputSource.
+void build_src_options(std::vector<SrcOption>& opts, int player,
+                       const std::vector<std::string>& pads) {
+    opts.clear();
+    opts.push_back({ "none", "None" });
+    opts.push_back({ "kbd",  "Keyboard" });
+    if (player >= 0 && player < (int)pads.size())
+        opts.push_back({ "pad", pads[player] });
+}
+
+const char* src_to_value(InputSource s) {
+    return s == InputSource::Keyboard ? "kbd"
+         : s == InputSource::Gamepad  ? "pad"
+         : "none";
+}
+InputSource value_to_src(const Rml::String& v) {
+    if (v == "kbd") return InputSource::Keyboard;
+    if (v == "pad") return InputSource::Gamepad;
+    return InputSource::None;
 }
 
 std::string src_label(InputSource s, int player, const std::vector<std::string>& pads) {
@@ -289,6 +322,8 @@ void refresh_settings_labels(Model& m, const SnesLauncherSettings& s) {
     m.p2_enabled = s.player_src[1] != InputSource::None;
     m.p1_src_label = src_label(s.player_src[0], 0, m.pad_names);
     m.p2_src_label = src_label(s.player_src[1], 1, m.pad_names);
+    m.p1_src_value = src_to_value(s.player_src[0]);
+    m.p2_src_value = src_to_value(s.player_src[1]);
     m.p1_status = m.p1_enabled ? "Enabled" : "Disabled";
     m.p2_status = m.p2_enabled ? "Enabled" : "Disabled";
     m.msu1_enabled = s.msu1_enabled;
@@ -404,6 +439,18 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     // controller dropdowns (the shim only guarantees VIDEO is up).
     SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
     m.pad_names = enumerate_pads();
+    // Keyboard is always active (mapped in keybinds.ini), so a "Gamepad" source
+    // only makes sense when a controller is actually plugged in. If a seeded
+    // Gamepad source has no device at its index (e.g. the games default
+    // EnableGamepad=true but nothing is connected), fall back to Keyboard (P1) /
+    // None (P2) instead of showing a phantom "Gamepad N (not connected)". A real
+    // connected pad keeps Gamepad and shows the device name.
+    for (int p = 0; p < 2; p++) {
+        if (io.player_src[p] == InputSource::Gamepad && p >= (int)m.pad_names.size())
+            io.player_src[p] = (p == 0) ? InputSource::Keyboard : InputSource::None;
+    }
+    build_src_options(m.p1_options, 0, m.pad_names);
+    build_src_options(m.p2_options, 1, m.pad_names);
     // A game ships boxart by dropping boxart.tga next to launcher.rml; shown when present.
     m.has_boxart = fs::exists(assets / "boxart.tga");
 
@@ -432,6 +479,13 @@ Result run(SDL_Window* window, void* /*gl_context*/,
         RmlGL3::Shutdown();
         return Result::Unavailable;
     }
+    // Register the controller-dropdown option struct + array for data-for.
+    if (auto sh = c.RegisterStruct<SrcOption>()) {
+        sh.RegisterMember("value", &SrcOption::value);
+        sh.RegisterMember("label", &SrcOption::label);
+    }
+    c.RegisterArray<std::vector<SrcOption>>();
+
     c.Bind("view", &m.view);
     c.Bind("game_name", &m.game_name);
     c.Bind("game_region", &m.game_region);
@@ -451,6 +505,10 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     c.Bind("msu1_note", &m.msu1_note);
     c.Bind("msu1_dir", &m.msu1_dir);
     c.Bind("msu1_pack_found", &m.msu1_pack_found);
+    c.Bind("p1_options", &m.p1_options);
+    c.Bind("p2_options", &m.p2_options);
+    c.Bind("p1_src_value", &m.p1_src_value);
+    c.Bind("p2_src_value", &m.p2_src_value);
     c.Bind("p1_src_label", &m.p1_src_label);
     c.Bind("p2_src_label", &m.p2_src_label);
     c.Bind("p1_status", &m.p1_status);
@@ -597,17 +655,22 @@ Result run(SDL_Window* window, void* /*gl_context*/,
         io.volume = io.volume <= 0 ? 0 : io.volume - 5; m.volume = io.volume; dirty_all();
     });
 
-    // ---- controller dropdown cycle + config ----
-    auto cycle_src = [&](int p) {
-        int v = (int)io.player_src[p];
-        io.player_src[p] = (InputSource)((v + 1) % 3);
+    // ---- controller source dropdowns (<select>) + config ----
+    // The <select>'s data-value binding keeps m.pN_src_value current; the change
+    // handler reads it and updates the live InputSource + status dot.
+    auto src_changed = [&](int p) {
+        io.player_src[p] = value_to_src(p == 0 ? m.p1_src_value : m.p2_src_value);
         refresh_settings_labels(m, io); dirty_all();
     };
-    c.BindEventCallback("cycle_p1_src", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) { cycle_src(0); });
-    c.BindEventCallback("cycle_p2_src", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) { cycle_src(1); });
+    c.BindEventCallback("p1_src_changed", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) { src_changed(0); });
+    c.BindEventCallback("p2_src_changed", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) { src_changed(1); });
     c.BindEventCallback("cfg_cycle_src", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
         int p = m.cfg_player;
-        io.player_src[p] = (InputSource)(((int)io.player_src[p] + 1) % 3);
+        bool has_pad = p < (int)m.pad_names.size();
+        int v = (int)io.player_src[p];
+        do { v = (v + 1) % 3; }
+        while (v == (int)InputSource::Gamepad && !has_pad);
+        io.player_src[p] = (InputSource)v;
         m.cfg_src_label = src_label(io.player_src[p], p, m.pad_names);
         refresh_settings_labels(m, io); dirty_all();
     });
@@ -642,6 +705,39 @@ Result run(SDL_Window* window, void* /*gl_context*/,
         return Result::Unavailable;
     }
     doc->Show();
+
+    // ---- populate the controller <select> dropdowns programmatically ----
+    // RmlUi builds a select's options at parse time, so data-for can't generate
+    // them; we add them by hand and listen for the change event. (None / Keyboard
+    // / the connected controller, per build_src_options above.)
+    struct SelListener : Rml::EventListener {
+        std::function<void()> on_change;
+        void ProcessEvent(Rml::Event&) override { if (on_change) on_change(); }
+    };
+    std::vector<std::unique_ptr<SelListener>> sel_listeners;
+    auto setup_select = [&](const char* id, int p) {
+        auto* sel = rmlui_dynamic_cast<Rml::ElementFormControlSelect*>(doc->GetElementById(id));
+        if (!sel) return;
+        sel->RemoveAll();
+        const std::vector<SrcOption>& opts = (p == 0) ? m.p1_options : m.p2_options;
+        Rml::String cur = src_to_value(io.player_src[p]);
+        int selected = 0;
+        for (int i = 0; i < (int)opts.size(); i++) {
+            sel->Add(opts[i].label, opts[i].value);
+            if (opts[i].value == cur) selected = i;
+        }
+        sel->SetSelection(selected);
+        auto lis = std::make_unique<SelListener>();
+        lis->on_change = [&, sel, p]() {
+            io.player_src[p] = value_to_src(sel->GetValue());
+            refresh_settings_labels(m, io);
+            dirty_all();
+        };
+        sel->AddEventListener(Rml::EventId::Change, lis.get());
+        sel_listeners.push_back(std::move(lis));
+    };
+    setup_select("p1src", 0);
+    setup_select("p2src", 1);
 
     // ---- main loop ----
     while (running) {

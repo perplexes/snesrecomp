@@ -77,6 +77,18 @@ button:hover { background-color: #222b3b; border-color: #7c3aed; }
 .ddbtn:hover { border-color: #7c3aed; }
 .ddbtn .lbl { flex: 1 1 auto; color: #e6e9ef; }
 .ddbtn .chev { color: #6e7781; margin-left: 8dp; }
+/* real <select> dropdown (controller source) */
+.ddsel { display: block; width: 100%; height: 38dp; box-sizing: border-box;
+	background-color: #161d28; border: 1dp #2b3446; border-radius: 7dp; color: #e6e9ef; font-size: 14dp; }
+.ddsel:hover { border-color: #7c3aed; }
+.ddsel selectvalue { padding: 9dp 12dp; color: #e6e9ef; }
+.ddsel selectarrow { width: 24dp; background-color: #1c2433; border-left: 1dp #2b3446;
+	border-radius: 0dp 6dp 6dp 0dp; }
+.ddsel selectbox { background-color: #161d28; border: 1dp #2b3446; border-radius: 7dp;
+	margin-top: 2dp; padding: 2dp 0dp; }
+.ddsel selectbox option { padding: 8dp 12dp; color: #e6e9ef; }
+.ddsel selectbox option:hover { background-color: #222b3b; }
+.ddsel selectbox option:checked { background-color: #2a2350; color: #ffffff; }
 .ctrl-status { display: flex; flex-direction: row; align-items: center; margin-top: 7dp; }
 .dot { width: 9dp; height: 9dp; border-radius: 5dp; background-color: #3fb950; margin-right: 7dp; flex: 0 0 9dp; }
 .dot.off { background-color: #6e7781; }
@@ -182,7 +194,7 @@ button.dim:hover { background-color: #141a24; border-color: #222a38; }
 				<div class="ctrl-row">
 					<img class="pad-art" src="img/snes_pad.tga"/>
 					<div class="ctrl-mid">
-						<div class="ddbtn" data-event-click="cycle_p1_src"><span class="lbl">{{p1_src_label}}</span><span class="chev">&#9662;</span></div>
+						<select class="ddsel" id="p1src"></select>
 						<div class="ctrl-status"><span class="dot" data-class-off="p1_enabled == false"></span><span class="txt">{{p1_status}}</span></div>
 					</div>
 					<button data-event-click="config_p1">Configure</button>
@@ -190,7 +202,7 @@ button.dim:hover { background-color: #141a24; border-color: #222a38; }
 				<div class="ctrl-row">
 					<img class="pad-art" src="img/snes_pad.tga"/>
 					<div class="ctrl-mid">
-						<div class="ddbtn" data-event-click="cycle_p2_src"><span class="lbl">{{p2_src_label}}</span><span class="chev">&#9662;</span></div>
+						<select class="ddsel" id="p2src"></select>
 						<div class="ctrl-status"><span class="dot" data-class-off="p2_enabled == false"></span><span class="txt">{{p2_status}}</span></div>
 					</div>
 					<button data-event-click="config_p2">Configure</button>
