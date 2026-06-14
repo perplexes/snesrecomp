@@ -120,7 +120,11 @@ bool pick_file(const char* title, const char* filter, char* out, size_t max_len)
     ofn.lpstrFile   = out;
     ofn.nMaxFile    = (DWORD)max_len;
     ofn.lpstrTitle  = title;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    // OFN_NOCHANGEDIR: keep the dialog from changing the process CWD, which would
+    // defeat snesrecomp_anchor_to_exe_dir() and scatter config.ini/saves next to
+    // the picked file instead of the exe.
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+              | OFN_NOCHANGEDIR;
     return GetOpenFileNameA(&ofn) != 0;
 }
 bool pick_folder(char* out, size_t max_len) {

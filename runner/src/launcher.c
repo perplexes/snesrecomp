@@ -94,6 +94,19 @@ int snesrecomp_abspath(const char *path, char *out, size_t max_len) {
 #endif
 }
 
+int snesrecomp_exe_dir_path(const char *leaf, char *out, size_t max_len) {
+    if (!leaf || !out || max_len == 0) return 0;
+    char dir[1024];
+    get_exe_dir(dir, sizeof(dir));
+    /* get_exe_dir falls back to "./" when the exe path is unavailable; in that
+     * case the caller is no better off than a bare relative name, so report
+     * failure and let it keep its CWD-relative default. */
+    if (dir[0] == '.' && (dir[1] == '/' || dir[1] == '\\' || dir[1] == '\0'))
+        return 0;
+    if (snprintf(out, max_len, "%s%s", dir, leaf) >= (int)max_len) return 0;
+    return 1;
+}
+
 /* Can we create files in `dir`? Probed by actually creating one —
  * access(W_OK) lies on Windows and inside sandboxed mounts. */
 static int dir_is_writable(const char *dir) {
@@ -170,7 +183,12 @@ static int pick_rom_file(char *out, size_t max_len) {
     ofn.lpstrFile   = out;
     ofn.nMaxFile    = (DWORD)max_len;
     ofn.lpstrTitle  = "Select SNES ROM";
-    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    /* OFN_NOCHANGEDIR: the common dialog otherwise changes the process CWD to
+     * the browsed folder, which defeats snesrecomp_anchor_to_exe_dir() and makes
+     * later CWD-relative writes (config.ini, saves/) land next to the picked ROM
+     * instead of next to the exe. */
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+                    | OFN_NOCHANGEDIR;
     return GetOpenFileNameA(&ofn) ? 1 : 0;
 #else
     (void)out; (void)max_len;

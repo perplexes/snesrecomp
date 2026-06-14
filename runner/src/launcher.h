@@ -103,6 +103,18 @@ int snesrecomp_anchor_to_exe_dir(void);
  */
 int snesrecomp_abspath(const char *path, char *out, size_t max_len);
 
+/*
+ * snesrecomp_exe_dir_path
+ *
+ * Build the absolute path of `leaf` (e.g. "config.ini") inside the executable's
+ * own directory, independent of the current working directory. Use this for
+ * files that must live next to the exe (config.ini, saves) so they are pinned
+ * even if something changes the CWD. Returns 1 and fills `out` on success;
+ * returns 0 when the exe directory can't be determined (caller should fall
+ * back to its CWD-relative default).
+ */
+int snesrecomp_exe_dir_path(const char *leaf, char *out, size_t max_len);
+
 #ifdef __cplusplus
 }
 #endif
