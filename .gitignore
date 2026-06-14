@@ -37,3 +37,6 @@ framedump_recomp/
 validate*.log
 regen.log
 cfg_audit_results/
+
+# launcher dep build artifacts (rebuilt via tools/build_launcher_deps.ps1)
+lib/_build/
