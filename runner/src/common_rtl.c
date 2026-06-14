@@ -599,11 +599,13 @@ void RtlRenderAudio(int16 *audio_buffer, int samples, int channels) {
 #define RTL_SRAM_FILE     "saves/save.srm"
 #define RTL_SRAM_BAK_FILE "saves/save.srm.bak"
 
-static void RtlMigrateLegacySram(void) {
+void RtlMigrateLegacySram(const char *legacy_title) {
+  if (!legacy_title || !*legacy_title) return;
   FILE *cur = fopen(RTL_SRAM_FILE, "rb");
   if (cur) { fclose(cur); return; }   /* already on the generic name */
   char legacy[64];
-  snprintf(legacy, sizeof(legacy), "saves/%s.srm", g_rtl_game_info->title);
+  snprintf(legacy, sizeof(legacy), "saves/%s.srm", legacy_title);
+  if (strcmp(legacy, RTL_SRAM_FILE) == 0) return;  /* legacy name IS the generic one */
   FILE *in = fopen(legacy, "rb");
   if (!in) return;                    /* no legacy save to carry forward */
   FILE *out = fopen(RTL_SRAM_FILE, "wb");
@@ -618,7 +620,7 @@ static void RtlMigrateLegacySram(void) {
 }
 
 void RtlReadSram(void) {
-  RtlMigrateLegacySram();
+  RtlMigrateLegacySram(g_rtl_game_info->title);
   FILE *f = fopen(RTL_SRAM_FILE, "rb");
   if (f) {
     if (fread(g_sram, 1, g_sram_size, f) != g_sram_size)

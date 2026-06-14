@@ -240,6 +240,10 @@ bool RtlUploadSpcImageFromDp(CpuState *cpu);
 bool RtlRunFrame(uint32 inputs);
 void RtlReadSram();
 void RtlWriteSram();
+// Copy a legacy saves/<legacy_title>.srm forward to the generic saves/save.srm
+// (idempotent). Call before the launcher so its SAVES panel reflects the carried-
+// forward save; RtlReadSram also calls it on boot as a fallback.
+void RtlMigrateLegacySram(const char *legacy_title);
 void RtlSaveSnapshot(const char *filename);
 bool RtlLoadSnapshot(const char *filename);
 
