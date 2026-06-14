@@ -128,11 +128,33 @@ button:hover { background-color: #222b3b; border-color: #7c3aed; }
 /* a disabled (dimmed) action button — no hover highlight, muted colours */
 button.dim { color: #45506280; border-color: #222a38; background-color: #141a24; }
 button.dim:hover { background-color: #141a24; border-color: #222a38; }
-.switch { width: 44dp; height: 24dp; border-radius: 12dp; background-color: #2b3446; display: block; }
+.switch { width: 44dp; height: 24dp; border-radius: 12dp; background-color: #2b3446; display: block;
+	box-sizing: border-box; border: 1dp transparent; tab-index: auto; }
 .switch.on { background-color: #7c3aed; }
 .knob { display: block; width: 18dp; height: 18dp; border-radius: 9dp; background-color: #e6e9ef; margin: 3dp 0dp 0dp 3dp; }
 .switch.on .knob { margin-left: 23dp; }
+
+/* focus ring — drawn for whichever control the gamepad/keyboard has focused */
+button:focus { border-color: #a78bfa; background-color: #222b3b; }
+.ddsel:focus { border-color: #a78bfa; }
+.switch:focus { border-color: #a78bfa; }
+#play:focus { background-color: #8b5cf6; border-color: #a78bfa; }
 .backbtn { margin-right: 12dp; }
+.skip-lbl { color: #adbac7; margin-left: 10dp; font-size: 14dp; }
+
+/* confirm modal (shown when enabling Skip Launcher on Boot) */
+.modal-backdrop { position: absolute; top: 0dp; left: 0dp; width: 100%; height: 100%;
+	background-color: #000000cc; display: flex; flex-direction: column;
+	align-items: center; justify-content: center; }
+.modal-box { width: 470dp; background-color: #11151d; border: 1dp #2b3446;
+	border-radius: 12dp; padding: 22dp 24dp; }
+.modal-title { display: block; font-size: 18dp; font-weight: bold; color: #ffffff; margin-bottom: 12dp; }
+.modal-text { display: block; color: #adbac7; font-size: 14dp; margin-bottom: 20dp; }
+.modal-btns { display: flex; flex-direction: row; justify-content: flex-end; }
+.modal-btns button { margin-left: 10dp; }
+.modal-confirm { background-color: #7c3aed; border-color: #8b5cf6; color: #ffffff; font-weight: bold; }
+.modal-confirm:hover { background-color: #8b5cf6; }
+.modal-confirm:focus { background-color: #8b5cf6; border-color: #a78bfa; }
 </style>
 </head>
 
@@ -271,12 +293,27 @@ button.dim:hover { background-color: #141a24; border-color: #222a38; }
 
 	<!-- ================= FOOTER ================= -->
 	<div class="footer">
-		<div class="foot-left"></div>
+		<div class="foot-left">
+			<span class="switch" data-if="view == 'dashboard'" data-class-on="skip_launcher" data-event-click="toggle_skip_launcher"><span class="knob"></span></span>
+			<span class="skip-lbl" data-if="view == 'dashboard'">Skip Launcher on Boot</span>
+		</div>
 		<div class="foot-mid">
 			<button class="backbtn" data-if="view != 'dashboard'" data-event-click="show_dashboard">&#8249; Back</button>
 			<button data-if="view == 'dashboard'" data-event-click="show_settings">Settings</button>
 		</div>
 		<button id="play" data-event-click="play">&#9654; PLAY</button>
+	</div>
+
+	<!-- ================= SKIP-LAUNCHER CONFIRM MODAL ================= -->
+	<div class="modal-backdrop" data-if="show_skip_modal">
+		<div class="modal-box">
+			<span class="modal-title">Skip the launcher on boot?</span>
+			<span class="modal-text">The launcher will no longer appear &#8212; the game boots straight in every time. To get the launcher back, run the game with the &#8220;--launcher&#8221; argument, or set &#8220;SkipLauncher = 0&#8221; in config.ini.</span>
+			<div class="modal-btns">
+				<button data-event-click="skip_modal_cancel">Cancel</button>
+				<button class="modal-confirm" data-event-click="skip_modal_confirm">Skip on Boot</button>
+			</div>
+		</div>
 	</div>
 
 </div>

@@ -242,6 +242,10 @@ struct Model {
     bool save_found = false;
     Rml::String save_file = "(none)", save_size = "0 KB";
 
+    // Boot straight to the game next time (dashboard toggle, issue #5).
+    bool skip_launcher = false;
+    bool show_skip_modal = false;   // confirm dialog shown while enabling skip
+
     // settings
     Rml::String renderer_label, scale_label, fullscreen_label, freq_label;
     bool aspect = false, filter = false, widescreen = false, widescreen_hud = true;
@@ -364,6 +368,24 @@ void load_rom_info(Model& m, const GameInfo& g, const std::string& path) {
     m.status_ready = true;
 }
 
+// Populate the SAVES panel from the game's exe-anchored SRAM path. Shows the
+// bare filename (the directory is always <exe>/saves) and whether it exists yet.
+void refresh_save_info(Model& m, const std::string& sram_path) {
+    if (sram_path.empty()) {
+        m.save_found = false; m.save_file = "(none)"; m.save_size = "0 KB";
+        return;
+    }
+    m.save_file = basename_of(sram_path);
+    std::error_code ec;
+    if (fs::exists(sram_path, ec) && !ec) {
+        m.save_found = true;
+        m.save_size = human_size((long)fs::file_size(sram_path, ec));
+    } else {
+        m.save_found = false;
+        m.save_size = "0 KB";
+    }
+}
+
 bool load_fonts(const fs::path& assets) {
     bool any = false;
     const char* faces[] = { "fonts/LatoLatin-Regular.ttf", "fonts/LatoLatin-Bold.ttf" };
@@ -443,6 +465,13 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     // controller dropdowns (the shim only guarantees VIDEO is up).
     SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
     m.pad_names = enumerate_pads();
+    // Open connected controllers so their button/axis events reach the loop —
+    // required to navigate the launcher with a gamepad (issue: controller nav).
+    std::vector<SDL_GameController*> open_pads;
+    for (int i = 0; i < SDL_NumJoysticks(); i++)
+        if (SDL_IsGameController(i))
+            if (SDL_GameController* gc = SDL_GameControllerOpen(i))
+                open_pads.push_back(gc);
     // Keyboard is always active (mapped in keybinds.ini), so a "Gamepad" source
     // only makes sense when a controller is actually plugged in. If a seeded
     // Gamepad source has no device at its index (e.g. the games default
@@ -475,6 +504,11 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     load_rom_info(m, game, rom_path);
     m.msu1_patch_available = game.msu1_supported && game.msu1_patch_path &&
                              m.rom_loaded && m.crc_match;
+
+    // SAVES panel + skip-launcher toggle (issues #3a / #5).
+    std::string sram_path = game.sram_path ? game.sram_path : "";
+    refresh_save_info(m, sram_path);
+    m.skip_launcher = io.skip_launcher;
 
     Rml::DataModelConstructor c = context->CreateDataModel("launcher");
     if (!c) {
@@ -522,6 +556,8 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     c.Bind("save_found", &m.save_found);
     c.Bind("save_file", &m.save_file);
     c.Bind("save_size", &m.save_size);
+    c.Bind("skip_launcher", &m.skip_launcher);
+    c.Bind("show_skip_modal", &m.show_skip_modal);
     c.Bind("renderer_label", &m.renderer_label);
     c.Bind("scale_label", &m.scale_label);
     c.Bind("fullscreen_label", &m.fullscreen_label);
@@ -616,9 +652,60 @@ Result run(SDL_Window* window, void* /*gl_context*/,
         if (io.msu1_dir[0]) open_in_explorer(io.msu1_dir);
     });
 
-    // ---- saves (stub: import/clear hooks for P2) ----
-    c.BindEventCallback("save_import", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {});
-    c.BindEventCallback("save_clear", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {});
+    // ---- saves (import/clear the game's SRAM .srm) ----
+    // Import: pick a .srm/.sav, back up any existing save to <name>.srm.bak, then
+    // copy the chosen file into place (issue #3a). Clear: back up, then delete.
+    c.BindEventCallback("save_import", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
+        if (sram_path.empty()) return;
+        char buf[1024];
+        if (!pick_file("Import SRAM Save",
+                       "SNES saves (*.srm;*.sav)\0*.srm;*.sav\0All Files (*.*)\0*.*\0",
+                       buf, sizeof(buf)))
+            return;
+        std::error_code ec;
+        fs::path dst(sram_path);
+        fs::create_directories(dst.parent_path(), ec);
+        ec.clear();
+        if (fs::exists(dst, ec))
+            fs::copy_file(dst, fs::path(sram_path + ".bak"),
+                          fs::copy_options::overwrite_existing, ec);
+        ec.clear();
+        fs::copy_file(fs::path(buf), dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) std::fprintf(stderr, "launcher: import save failed: %s\n", ec.message().c_str());
+        refresh_save_info(m, sram_path);
+        dirty_all();
+    });
+    c.BindEventCallback("save_clear", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
+        if (sram_path.empty()) return;
+        std::error_code ec;
+        fs::path dst(sram_path);
+        if (fs::exists(dst, ec)) {
+            fs::copy_file(dst, fs::path(sram_path + ".bak"),
+                          fs::copy_options::overwrite_existing, ec);
+            ec.clear();
+            fs::remove(dst, ec);
+            if (ec) std::fprintf(stderr, "launcher: clear save failed: %s\n", ec.message().c_str());
+        }
+        refresh_save_info(m, sram_path);
+        dirty_all();
+    });
+    // ---- skip launcher (boot straight to the game on boot, issue #5) ----
+    // Enabling pops a confirm modal (it changes how the user reaches the
+    // launcher); disabling is harmless and takes effect immediately.
+    c.BindEventCallback("toggle_skip_launcher", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
+        if (io.skip_launcher) {
+            io.skip_launcher = false; m.skip_launcher = false;
+        } else {
+            m.show_skip_modal = true;   // ask before turning it on
+        }
+        dirty_all();
+    });
+    c.BindEventCallback("skip_modal_confirm", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
+        io.skip_launcher = true; m.skip_launcher = true; m.show_skip_modal = false; dirty_all();
+    });
+    c.BindEventCallback("skip_modal_cancel", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
+        m.show_skip_modal = false; dirty_all();   // leave skip_launcher off
+    });
 
     // ---- display settings ----
     c.BindEventCallback("cycle_renderer", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
@@ -647,10 +734,13 @@ Result run(SDL_Window* window, void* /*gl_context*/,
 
     // ---- audio (always on; MSU-1 is the mode toggle, not an on/off) ----
     c.BindEventCallback("cycle_freq", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
-        int rates[] = { 32000, 44100, 48000 };
-        int idx = 2;
-        for (int i = 0; i < 3; i++) if (rates[i] == io.audio_freq) idx = i;
-        io.audio_freq = rates[(idx + 1) % 3]; refresh_settings_labels(m, io); dirty_all();
+        // 32040 = native S-DSP rate and the config default; it MUST be in the
+        // cycle or stepping away from it makes the default unreachable (issue #3).
+        int rates[] = { 32040, 32000, 44100, 48000 };
+        int n = (int)(sizeof(rates) / sizeof(rates[0]));
+        int idx = 0;
+        for (int i = 0; i < n; i++) if (rates[i] == io.audio_freq) idx = i;
+        io.audio_freq = rates[(idx + 1) % n]; refresh_settings_labels(m, io); dirty_all();
     });
     c.BindEventCallback("vol_up", [&](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList&) {
         io.volume = io.volume >= 100 ? 100 : io.volume + 5; m.volume = io.volume; dirty_all();
@@ -743,6 +833,46 @@ Result run(SDL_Window* window, void* /*gl_context*/,
     setup_select("p1src", 0);
     setup_select("p2src", 1);
 
+    // Seed focus on PLAY so a gamepad/keyboard user always has a visible focus
+    // ring and can confirm (A / Enter) or navigate (D-pad / Tab) from there.
+    if (auto* pb = doc->GetElementById("play")) pb->Focus();
+
+    // ---- gamepad navigation ----
+    // RmlUi moves focus on Tab (Shift+Tab reverses) and emulates a click on the
+    // focused control on Enter/Space. We translate the pad to those: D-pad /
+    // left-stick = move focus, A = activate, B = back to dashboard, Start = PLAY.
+    auto nav_back = [&]() { if (m.view != "dashboard") { m.view = "dashboard"; dirty_all(); } };
+    auto pad_move = [&](int dir) {
+        context->ProcessKeyDown(Rml::Input::KI_TAB,
+                                dir < 0 ? (int)Rml::Input::KM_SHIFT : 0);
+    };
+    int pad_zone_x = 0, pad_zone_y = 0;   // edge-trigger state for the left stick
+    auto handle_pad = [&](const SDL_Event& e) {
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+            switch (e.cbutton.button) {
+                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: pad_move(+1); break;
+                case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  pad_move(-1); break;
+                case SDL_CONTROLLER_BUTTON_A:
+                    context->ProcessKeyDown(Rml::Input::KI_RETURN, 0); break;
+                case SDL_CONTROLLER_BUTTON_B: nav_back(); break;
+                case SDL_CONTROLLER_BUTTON_START:
+                    if (auto* pb = doc->GetElementById("play")) pb->Click(); break;
+                default: break;
+            }
+        } else if (e.type == SDL_CONTROLLERAXISMOTION) {
+            const int TH = 18000;   // ~55% deflection; edge-triggered, one move per push
+            if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                int z = e.caxis.value > TH ? 1 : e.caxis.value < -TH ? -1 : 0;
+                if (z != pad_zone_y) { pad_zone_y = z; if (z) pad_move(z); }
+            } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                int z = e.caxis.value > TH ? 1 : e.caxis.value < -TH ? -1 : 0;
+                if (z != pad_zone_x) { pad_zone_x = z; if (z) pad_move(z); }
+            }
+        }
+    };
+
     // ---- main loop ----
     while (running) {
         SDL_Event ev;
@@ -755,6 +885,12 @@ Result run(SDL_Window* window, void* /*gl_context*/,
                 render_interface.SetViewport(win_w, win_h);
                 context->SetDimensions(Rml::Vector2i(win_w, win_h));
                 RmlSDL::InputEventHandler(context, ev);
+            } else if (ev.type == SDL_CONTROLLERBUTTONDOWN ||
+                       ev.type == SDL_CONTROLLERAXISMOTION) {
+                handle_pad(ev);
+            } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                if (SDL_GameController* gc = SDL_GameControllerOpen(ev.cdevice.which))
+                    open_pads.push_back(gc);
             } else {
                 RmlSDL::InputEventHandler(context, ev);
             }
@@ -769,6 +905,8 @@ Result run(SDL_Window* window, void* /*gl_context*/,
         SDL_GL_SwapWindow(window);
         SDL_Delay(8);
     }
+
+    for (SDL_GameController* gc : open_pads) SDL_GameControllerClose(gc);
 
     Rml::Shutdown();
     RmlGL3::Shutdown();
@@ -836,6 +974,7 @@ extern "C" int snes_launcher_run_window(const char* window_title,
     s.player_src[1] = (InputSource)io->player_src[1];
     s.deadzone[0]   = io->deadzone[0];
     s.deadzone[1]   = io->deadzone[1];
+    s.skip_launcher = io->skip_launcher != 0;
     s.msu1_enabled  = io->msu1_enabled != 0;
     std::snprintf(s.msu1_dir, sizeof(s.msu1_dir), "%s", io->msu1_dir);
 
@@ -850,6 +989,7 @@ extern "C" int snes_launcher_run_window(const char* window_title,
     g.msu1_supported = game->msu1_supported != 0;
     g.msu1_note = game->msu1_note;
     g.msu1_patch_path = game->msu1_patch_path;
+    g.sram_path = game->sram_path;
 
     Result r = run(win, ctx, s, g, assets_dir, initial_rom,
                    out_rom_path, out_rom_path_len);
@@ -869,6 +1009,7 @@ extern "C" int snes_launcher_run_window(const char* window_title,
     io->player_src[1] = (int)s.player_src[1];
     io->deadzone[0]   = s.deadzone[0];
     io->deadzone[1]   = s.deadzone[1];
+    io->skip_launcher = s.skip_launcher;
     io->msu1_enabled  = s.msu1_enabled;
     std::snprintf(io->msu1_dir, sizeof(io->msu1_dir), "%s", s.msu1_dir);
 

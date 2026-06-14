@@ -61,6 +61,12 @@ struct SnesLauncherSettings {
     InputSource player_src[2] = { InputSource::Keyboard, InputSource::Gamepad };
     int  deadzone[2]     = { 30, 30 };  // 0..100 percent of stick range
 
+    // --- Launcher behaviour ---
+    bool skip_launcher   = false;       // boot straight to the game on subsequent
+                                        // launches (pass --launcher, or set
+                                        // SkipLauncher = 0 in config.ini, to force
+                                        // the launcher back).
+
     // --- MSU-1 ---
     bool msu1_enabled    = true;        // use streamed audio when a pack is present
     char msu1_dir[512]   = {0};         // directory holding <name>-N.pcm / <name>.msu
@@ -72,6 +78,11 @@ struct GameInfo {
     const char* name             = nullptr;  // "Super Mario World"
     const char* region           = nullptr;  // "(USA)"
     const char* boxart_png       = nullptr;  // optional asset filename under img/
+
+    // SRAM save file this game reads/writes, exe-dir anchored (e.g.
+    // "saves/Super Mario World.srm"). Drives the SAVES panel (found/size) and the
+    // Import / Clear Save actions. Null => the SAVES panel stays inert.
+    const char* sram_path        = nullptr;
 
     // ROM verification. CRC32 is the quick badge; the SHA-256 list is the set of
     // accepted ROMs (vanilla + MSU-1-patched). Either may be empty.

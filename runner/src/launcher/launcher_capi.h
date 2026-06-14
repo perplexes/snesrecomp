@@ -29,6 +29,7 @@ typedef struct SnesLauncherCSettings {
     int  volume;            // 0..100
     int  player_src[2];     // 0 none, 1 keyboard, 2 gamepad
     int  deadzone[2];       // 0..100
+    int  skip_launcher;     // bool: boot straight to the game next time
     int  msu1_enabled;      // bool
     char msu1_dir[512];
 } SnesLauncherCSettings;
@@ -44,6 +45,7 @@ typedef struct SnesLauncherCGameInfo {
     int            msu1_supported;
     const char*    msu1_note;          /* shown under MSU-1 settings (which patch) */
     const char*    msu1_patch_path;
+    const char*    sram_path;          /* "saves/<title>.srm" (exe-anchored) for SAVES panel */
 } SnesLauncherCGameInfo;
 
 // Returns: 0 = LAUNCH (boot out_rom_path with the edited *io),
