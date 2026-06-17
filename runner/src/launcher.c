@@ -46,6 +46,23 @@ static int get_exe_path(char *out, size_t max_len) {
     uint32_t size = (uint32_t)max_len;
     return _NSGetExecutablePath(out, &size) == 0 ? 1 : 0;
 #elif defined(__linux__)
+    /* Inside an AppImage, /proc/self/exe resolves to the binary in the
+     * read-only squashfs mount (/tmp/.mount_XXXXXX/usr/bin/<game>), NOT
+     * to where the user's .AppImage and config.ini live. The AppImage
+     * runtime exports $APPIMAGE = absolute path of the .AppImage file;
+     * use it so config.ini / rom.cfg / saves anchor next to the .AppImage,
+     * exactly as they anchor next to the .exe on Windows. Without this the
+     * exe dir is the read-only mount: anchoring declines (not writable),
+     * the config path resolves inside the mount, and the user's config.ini
+     * beside the .AppImage is never read — so e.g. Widescreen stays off on
+     * Linux no matter what the file says. */
+    const char *appimg = getenv("APPIMAGE");
+    if (appimg && appimg[0]) {
+        size_t len = strlen(appimg);
+        if (len >= max_len) return 0;
+        memcpy(out, appimg, len + 1);
+        return 1;
+    }
     ssize_t n = readlink("/proc/self/exe", out, max_len - 1);
     if (n <= 0) return 0;
     out[n] = '\0';
@@ -138,6 +155,11 @@ int snesrecomp_anchor_to_exe_dir(void) {
         fprintf(stderr, "[Launcher] Could not change directory to '%s'.\n", dir);
         return 0;
     }
+    /* Make the anchor visible: this is where config.ini / keybinds.ini /
+     * rom.cfg / saves are read and written. On an AppImage this prints the
+     * folder containing the .AppImage (via $APPIMAGE), which is the single
+     * most common confusion ("I edited config.ini but nothing changed"). */
+    fprintf(stderr, "[Launcher] Config/saves anchored to '%s'.\n", dir);
     return 1;
 }
 
@@ -172,6 +194,28 @@ static void rom_cfg_write(const char *rom_path) {
 
 /* ---- File picker ---- */
 
+#ifndef _WIN32
+/* Run one shell-wrapped native chooser, read the selected path from its
+ * stdout. The command is expected to print a single absolute path and exit
+ * 0 on selection, or exit non-zero / print nothing on cancel or when the
+ * tool is absent (each command is gated on `command -v <tool>`). Returns 1
+ * and fills `out` only on a real selection. */
+static int run_picker_cmd(const char *cmd, char *out, size_t max_len) {
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+    char buf[1024];
+    buf[0] = '\0';
+    char *got = fgets(buf, sizeof(buf), p);
+    int rc = pclose(p);
+    if (!got) return 0;                 /* nothing printed: cancel / tool absent */
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
+    if (rc != 0 || n == 0 || n >= max_len) return 0;
+    memcpy(out, buf, n + 1);
+    return 1;
+}
+#endif
+
 static int pick_rom_file(char *out, size_t max_len) {
 #ifdef _WIN32
     OPENFILENAMEA ofn;
@@ -191,9 +235,37 @@ static int pick_rom_file(char *out, size_t max_len) {
                     | OFN_NOCHANGEDIR;
     return GetOpenFileNameA(&ofn) ? 1 : 0;
 #else
-    (void)out; (void)max_len;
+    /* Native graphical chooser, in preference order. Each entry is gated on
+     * `command -v <tool>` so an absent tool falls through to the next, and
+     * stderr is muted so "command not found" never reaches the user. The
+     * caller still has rom.cfg (cached path) and the positional ROM arg as
+     * fallbacks when none of these exist (e.g. Steam Deck Gaming Mode, or a
+     * headless box). No new link-time dependencies — all via popen. */
+    out[0] = '\0';
+    static const char *const pickers[] = {
+        /* zenity — GTK / GNOME, also the most common standalone tool. */
+        "command -v zenity >/dev/null 2>&1 && "
+        "zenity --file-selection --title='Select SNES ROM' "
+        "--file-filter='SNES ROMs (.sfc .smc) | *.sfc *.smc *.SFC *.SMC' "
+        "--file-filter='All files | *' 2>/dev/null",
+        /* kdialog — KDE / Steam Deck Desktop Mode. */
+        "command -v kdialog >/dev/null 2>&1 && "
+        "kdialog --getopenfilename \"${HOME:-/}\" "
+        "'*.sfc *.smc *.SFC *.SMC|SNES ROMs' 2>/dev/null",
+        /* qarma — Qt drop-in for zenity. */
+        "command -v qarma >/dev/null 2>&1 && "
+        "qarma --file-selection --title='Select SNES ROM' 2>/dev/null",
+        /* macOS — AppleScript chooser returning a POSIX path. */
+        "command -v osascript >/dev/null 2>&1 && "
+        "osascript -e 'POSIX path of (choose file with prompt \"Select SNES ROM\")' "
+        "2>/dev/null",
+    };
+    for (size_t i = 0; i < sizeof(pickers) / sizeof(pickers[0]); i++)
+        if (run_picker_cmd(pickers[i], out, max_len))
+            return 1;
     fprintf(stderr,
-            "[Launcher] No ROM specified and no file picker on this platform.\n"
+            "[Launcher] No ROM specified and no graphical file chooser found "
+            "(install zenity or kdialog), and no cached rom.cfg.\n"
             "Pass the ROM path as the first argument.\n");
     return 0;
 #endif
