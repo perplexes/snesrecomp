@@ -147,12 +147,13 @@ static inline void gsu_latch_romdr(Gsu* g) {
 }
 
 // Write a value to the destination register; if Dreg==R15 this is a branch
-// (alters PC). Then apply the standard post-instruction prefix reset.
+// (alters PC). Then apply the standard post-instruction prefix reset. A write
+// to R14 triggers the ROM data prefetch, but that is handled uniformly by the
+// gsu_step wrapper (any R14 change re-latches ROMDR), so we don't special-case
+// it here — that also covers INC/DEC/IWT/IBT/LM writes that bypass write_dreg.
 static inline void write_dreg(Gsu* g, uint16_t val) {
   g->r[g->dreg] = val;
   // R15 write here just sets PC; GO stays as-is (already running).
-  // A write to R14 triggers the ROM data prefetch (see gsu_latch_romdr).
-  if (g->dreg == 14) gsu_latch_romdr(g);
 }
 
 // ---- Flag computation for ALU ops --------------------------------------
@@ -336,7 +337,7 @@ static void do_branch(Gsu* g, int take) {
 // ---- The instruction step ----------------------------------------------
 //
 // Executes one opcode. Returns the number of GSU cycles (approx 1 here).
-static int gsu_step(Gsu* g) {
+static int gsu_step_inner(Gsu* g) {
 #ifndef GSU_NO_TRACE
   /* Env-gated single-step trace (GSU_TRACE=N logs the first N instructions to
    * stderr as "GSU pbr:r15 op=.. sfr=.."). Debug aid for boot bring-up. */
@@ -826,10 +827,10 @@ static int gsu_step(Gsu* g) {
         // RAMB: set RAM bank = Sreg low byte.
         g->rambr = g->r[sreg] & 0xff;
       } else {
-        // GETC: COLOR = ROM data byte at ROMBR:R14 (R14 read latch). Refresh
-        // from the current R14 in case it changed via INC/DEC/ALU (which do
-        // not go through write_dreg's latch trigger).
-        gsu_latch_romdr(g);
+        // GETC: COLOR = the latched ROM data byte (ROMDR). The latch is
+        // (re)loaded whenever R14 changes (see gsu_step); GETC does NOT
+        // re-sample ROM here — a ROMB between the R14 write and GETC must NOT
+        // reload the buffer (hardware quirk Doom relies on).
         g->color = g->romdr_byte;
       }
       clear_prefixes(g);
@@ -848,11 +849,10 @@ static int gsu_step(Gsu* g) {
       return 1;
     }
 
-    // 0xEF: GETB / GETBH / GETBL / GETBS (ALT variants) — read ROM byte.
+    // 0xEF: GETB / GETBH / GETBL / GETBS (ALT variants) — read the latched ROM
+    // byte (ROMDR). The latch is (re)loaded whenever R14 changes (see
+    // gsu_step); GETB does NOT re-sample ROM here.
     case 0xef: {
-      // Refresh ROMDR from the current R14 (INC/DEC/ALU writes to R14 bypass
-      // write_dreg's latch trigger), then read the byte.
-      gsu_latch_romdr(g);
       uint8_t b = g->romdr_byte;
       uint16_t res;
       if (alt1 && alt2) {
@@ -909,6 +909,19 @@ static int gsu_step(Gsu* g) {
       clear_prefixes(g);
       return 1;
   }
+}
+
+// Execute one opcode and model the R14-triggered ROM prefetch: whenever an
+// instruction changes R14 (write, INC, DEC, ALU, IWT/IBT/LM, ...), the GSU
+// starts a ROM read at ROMBR:R14 whose byte lands in ROMDR for the next
+// GETB/GETC. Detecting the change here re-latches uniformly regardless of which
+// opcode wrote R14, using the ROMBR in effect at that moment (so a later ROMB
+// without an R14 write does NOT reload — the documented hardware quirk).
+static int gsu_step(Gsu* g) {
+  uint16_t r14_before = g->r[14];
+  int cycles = gsu_step_inner(g);
+  if (g->r[14] != r14_before) gsu_latch_romdr(g);
+  return cycles;
 }
 
 void gsu_run(Gsu* g, int maxCycles) {
