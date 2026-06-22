@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 
 // Register-window byte offsets within $3000.
 #define R(n)   ((n) * 2)        // low byte of Rn
@@ -381,6 +382,78 @@ static void test_getb_rom_data(void) {
   printf("  test_getb_rom_data OK\n");
 }
 
+// ======================================================================
+// Performance tests. The GSU core runs Star Fox's per-frame 3D pipeline
+// (MDECRUNCH decompress + transform/project/plot), so its raw instruction
+// and PLOT throughput bound the achievable frame rate. These benchmarks
+// time a large fixed workload and assert a conservative throughput floor —
+// they guard against catastrophic perf regressions (e.g. accidentally
+// reintroducing a per-instruction malloc or O(n) rescan) rather than
+// pin an exact number, and they print the measured rate for tracking.
+// ----------------------------------------------------------------------
+
+// Relaunch an already-loaded GSU program from PBR:0 / PC:0 and run to STOP.
+static void relaunch_and_run(Gsu* g) {
+  gsu_write(g, PBR, 0x00);
+  gsu_write(g, R(15), 0x00);
+  gsu_write(g, RHI(15), 0x00);
+  gsu_run(g, 1 << 30);  // cap far above the workload; returns at STOP
+}
+
+static void perf_alu_throughput(void) {
+  // A straight-line block of INC R1 (1 byte, real ALU work, no operand
+  // fetch) terminated by STOP. Running it many times measures sustained
+  // interpreter dispatch + ALU throughput.
+  enum { BODY = 4096, RUNS = 4000 };
+  static uint8_t prog[BODY + 1];
+  memset(prog, 0xD1, BODY);   // INC R1
+  prog[BODY] = 0x00;          // STOP
+  Gsu* g = make_gsu_with_program(prog, BODY + 1);
+
+  clock_t t0 = clock();
+  for (int r = 0; r < RUNS; r++)
+    relaunch_and_run(g);
+  double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+
+  double insns = (double)BODY * RUNS;
+  double mips = insns / (secs > 0 ? secs : 1e-9) / 1e6;
+  printf("  [perf] ALU throughput: %.1f M insn/s (%.0f insns in %.3fs)\n", mips, insns, secs);
+  CHECK(secs >= 0.0);     // ran to completion
+  CHECK(mips > 1.0);      // floor: catches catastrophic regressions only
+  gsu_free(g);
+}
+
+static void perf_plot_throughput(void) {
+  // PLOT is the rendering-critical op: it writes the framebuffer (bitplane
+  // scatter) and advances R1. Benchmark a block of back-to-back PLOTs after
+  // setting COLOR once. R1 wraps within the line; the framebuffer writes
+  // exercise the same scatter path Star Fox's rasterizer hits per pixel.
+  enum { PLOTS = 2048, RUNS = 700 };
+  static uint8_t prog[16 + PLOTS + 1];
+  int n = 0;
+  prog[n++] = 0xF1; prog[n++] = 0x00; prog[n++] = 0x00;  // IWT R1,#0  (X)
+  prog[n++] = 0xF2; prog[n++] = 0x00; prog[n++] = 0x00;  // IWT R2,#0  (Y)
+  prog[n++] = 0xF6; prog[n++] = 0xA5; prog[n++] = 0x00;  // IWT R6,#$A5
+  prog[n++] = 0xB6;                                       // FROM R6 (Sreg=6)
+  prog[n++] = 0x4E;                                       // COLOR = 0xA5
+  for (int i = 0; i < PLOTS; i++) prog[n++] = 0x4C;       // PLOT (R1++)
+  prog[n++] = 0x00;                                       // STOP
+  Gsu* g = make_gsu_with_program(prog, n);
+  gsu_write(g, SCBR, 0x00);
+  gsu_write(g, SCMR, 0x00);
+
+  clock_t t0 = clock();
+  for (int r = 0; r < RUNS; r++)
+    relaunch_and_run(g);
+  double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+
+  double plots = (double)PLOTS * RUNS;
+  double mpps = plots / (secs > 0 ? secs : 1e-9) / 1e6;
+  printf("  [perf] PLOT throughput: %.1f M plot/s (%.0f plots in %.3fs)\n", mpps, plots, secs);
+  CHECK(mpps > 0.5);      // floor: catches catastrophic regressions only
+  gsu_free(g);
+}
+
 int main(void) {
   printf("GSU unit tests:\n");
   test_register_window();
@@ -396,6 +469,9 @@ int main(void) {
   test_getb_rom_data();
   test_branch_delay_slot();
   test_iwt_r15_delay_slot();
+  printf("GSU performance tests:\n");
+  perf_alu_throughput();
+  perf_plot_throughput();
   printf("ALL %d CHECKS PASSED\n", g_tests);
   return 0;
 }
