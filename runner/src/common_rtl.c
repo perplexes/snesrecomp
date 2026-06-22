@@ -249,6 +249,14 @@ void WriteReg(uint16 reg, uint8 value) {
         static long s_cap = -1;
         if (s_cap < 0) { const char* e = getenv("GSU_MAXCYC"); s_cap = e ? atol(e) : 2000000; }
         gsu_run(g_snes->gsu, (int)s_cap);
+        // GSU_LAUNCH_LOG=N: report the first N launches with cycles consumed, so
+        // we can tell whether the 3D path is reached at all and how much work it
+        // does per frame (empty scene -> tiny cycle count; real polys -> larger).
+        { static long s_ll = -2, s_n = 0;
+          if (s_ll == -2) { const char* e = getenv("GSU_LAUNCH_LOG"); s_ll = e ? atol(e) : 0; }
+          if (s_ll > 0 && s_n < s_ll) { s_n++;
+            fprintf(stderr, "[gsu-launch #%ld] still_running_after_cap=%d\n",
+                    s_n, gsu_is_running(g_snes->gsu)); } }
         if (gsu_is_running(g_snes->gsu)) {
           static long s_warned = 0;
           if (s_warned < 8) { s_warned++;
