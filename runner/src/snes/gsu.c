@@ -63,6 +63,7 @@ struct Gsu {
   // Prefix / instruction state.
   uint8_t  sreg;  // source register index
   uint8_t  dreg;  // dest register index
+  uint16_t lastRamAdr; // last RAM address touched by LDW/STW/LM/SM/LMS/SMS (for SBK)
   uint16_t color; // COLOR register (plot color)
   uint8_t  pipe;  // prefetched opcode (pipeline)
   bool     pipe_valid;
@@ -318,9 +319,9 @@ static int gsu_step(Gsu* g) {
   extern long g_gsu_trace_budget;
   if (g_gsu_trace_budget > 0) {
     g_gsu_trace_budget--;
-    fprintf(stderr, "GSU %02x:%04x op=%02x sfr=%04x r1=%04x r2=%04x cbr=%02x%02x\n",
+    fprintf(stderr, "GSU %02x:%04x op=%02x sfr=%04x r6=%04x r9=%04x r13=%04x r14=%04x\n",
             g->pbr, g->r[15], rom_read(g, g->pbr, g->r[15]), g->sfr,
-            g->r[1], g->r[2], g->cbr_hi, g->cbr_lo);
+            g->r[6], g->r[9], g->r[13], g->r[14]);
   }
 #endif
   uint8_t op = fetch(g);
@@ -403,20 +404,16 @@ static int gsu_step(Gsu* g) {
     case 0x1c: case 0x1d: case 0x1e: case 0x1f: {
       int rn = op & 0x0f;
       if (bflag) {
-        // WITH: this opcode followed a previous WITH/0x20-prefix; it is a
-        // MOVE Sreg->Dreg=rn ... but canonical WITH sets Sreg=Dreg=rn.
-        g->sreg = rn;
-        g->dreg = rn;
-        g->sfr &= ~GSU_SFR_B; // B consumed
-        // WITH is itself a prefix: do NOT reset prefixes; keep ALT latches.
+        // MOVE Rn <- SREG: a real register move (no flag change), terminating.
+        // Reached when a preceding WITH (0x20-0x2F) set the B flag.
+        g->r[rn] = g->r[sreg];
+        clear_prefixes(g); // also clears B
         return 1;
       } else {
-        // TO/MOVE prefix: set Dreg = rn. It's a prefix (no prefix reset),
-        // EXCEPT when... TO is a pure prefix. The actual MOVE happens when
-        // the *next* opcode is also a register op; in canonical GSU, TO just
-        // sets Dreg and is a prefix instruction.
+        // TO Rn: prefix that selects the destination register for the
+        // following ALU op. Does not reset prefixes / ALT latches.
         g->dreg = rn;
-        return 1; // prefix: do not clear ALT/Sreg
+        return 1;
       }
     }
 
@@ -438,6 +435,7 @@ static int gsu_step(Gsu* g) {
     case 0x38: case 0x39: case 0x3a: case 0x3b: {
       int rn = op & 0x0f;
       uint16_t addr = g->r[rn];
+      g->lastRamAdr = addr;
       uint16_t v = g->r[sreg];
       if (alt1) {
         // STB: store low byte.
@@ -472,6 +470,7 @@ static int gsu_step(Gsu* g) {
     case 0x48: case 0x49: case 0x4a: case 0x4b: {
       int rn = op & 0x0f;
       uint16_t addr = g->r[rn];
+      g->lastRamAdr = addr;
       uint16_t v;
       if (alt1) {
         v = ram_read(g, g->rambr, addr); // LDB byte
@@ -618,15 +617,12 @@ static int gsu_step(Gsu* g) {
       return 1;
     }
 
-    // 0x90 SBK: store word from Sreg to last RAM address (RAMADDR).
+    // 0x90 SBK: store SREG word back to the last RAM address touched by a
+    // LDW/STW/LM/SM/LMS/SMS (the GSU's RAM-address latch).
     case 0x90: {
-      // We model RAMADDR as the last LDW/STW address; simplest is to store
-      // to address in... canonical SBK uses an internal RAM buffer address.
-      // Simplified: store Sreg word at (R0)? bsnes keeps RAMADDR latch.
-      // We keep a latch-free model: store at address held in our `ramaddr`.
-      // Use R-less approach: store to ram[rambr:lastram]. To stay simple and
-      // correct for tests, store word at address = g->color? No — use R1.
-      // Stub: log once.
+      uint16_t addr = g->lastRamAdr;
+      ram_write(g, g->rambr, addr, g->r[sreg] & 0xff);
+      ram_write(g, g->rambr, addr + 1, g->r[sreg] >> 8);
       clear_prefixes(g);
       return 1;
     }
@@ -710,23 +706,26 @@ static int gsu_step(Gsu* g) {
       return 1;
     }
 
-    // 0xA0-0xAF IBT Rn,#imm / LMS / SMS (ALT1=SMS, ALT2=LMS)
+    // 0xA0-0xAF IBT Rn,#imm / LMS / SMS (ALT1=LMS load, ALT2=SMS store).
+    // (Canonical: base=IBT, ALT1=LMS, ALT2=SMS — these were previously swapped.)
     case 0xa0: case 0xa1: case 0xa2: case 0xa3:
     case 0xa4: case 0xa5: case 0xa6: case 0xa7:
     case 0xa8: case 0xa9: case 0xaa: case 0xab:
     case 0xac: case 0xad: case 0xae: case 0xaf: {
       int rn = op & 0x0f;
       if (alt1) {
-        // SMS Rn: store Rn word to RAM at (#imm<<1).
+        // LMS Rn,(yy): load Rn word from RAM at (#imm<<1).
         uint8_t pp = fetch(g);
         uint16_t addr = (uint16_t)pp << 1;
+        g->lastRamAdr = addr;
+        g->r[rn] = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
+      } else if (alt2) {
+        // SMS (yy),Rn: store Rn word to RAM at (#imm<<1).
+        uint8_t pp = fetch(g);
+        uint16_t addr = (uint16_t)pp << 1;
+        g->lastRamAdr = addr;
         ram_write(g, g->rambr, addr, g->r[rn] & 0xff);
         ram_write(g, g->rambr, addr + 1, g->r[rn] >> 8);
-      } else if (alt2) {
-        // LMS Rn: load Rn word from RAM at (#imm<<1).
-        uint8_t pp = fetch(g);
-        uint16_t addr = (uint16_t)pp << 1;
-        g->r[rn] = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
       } else {
         // IBT Rn,#imm : sign-extended byte immediate.
         int8_t imm = (int8_t)fetch(g);
