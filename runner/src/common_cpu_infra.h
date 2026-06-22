@@ -38,6 +38,16 @@ void WatchdogFrameStart(void);
  * 5s hang timer). Reentrancy is guarded by the framework. NULL = disabled. */
 typedef int (*CoopIrqPumpFunc)(void);
 extern CoopIrqPumpFunc g_coop_irq_pump;
+
+/* Host frame-present hook (game-agnostic). When a game's whole boot + main
+ * loop runs synchronously inside I_RESET and never returns to the host frame
+ * loop (so the SDL present + event pump never run), the cooperative pump can
+ * call this each time it completes a displayed frame to render + present the
+ * current PPU output and pump OS events, keeping the window live and pacing to
+ * ~60 fps. The host (launcher) registers it after the renderer is up; headless
+ * runs leave it NULL. Return nonzero to request shutdown (window closed). */
+typedef int (*HostPresentFunc)(void);
+extern HostPresentFunc g_host_present_hook;
 void RecompStackPush(const char *name);
 void RecompStackPop(void);
 /* Per-frame 65816 entry-S tracking for return-to-ancestor RTS resolution
