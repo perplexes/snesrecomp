@@ -715,7 +715,15 @@ static void PpuDrawBackgrounds(Ppu *ppu, int y, bool sub) {
   //  1: BG3 tiles with priority 0
   //  0: backdrop
 
-  if (PPU_mode(ppu) == 1) {
+  uint mode = PPU_mode(ppu);
+  if (mode == 1 || mode == 2) {
+    // Mode 1: BG1/BG2 4bpp + BG3 2bpp. Mode 2: BG1/BG2 4bpp, no BG3 (BG3's
+    // tilemap is repurposed as offset-per-tile data). Star Fox runs its 3D view
+    // in mode 2 — the GSU framebuffer is the BG1 char data behind a static
+    // pseudo-bitmap tilemap (sequential tile indices). BG1/BG2 priority
+    // resolution is identical for both modes, so they share the 4bpp calls;
+    // mode 2 just skips the BG3 pass. Offset-per-tile is not modeled (BG1 draws
+    // at scroll 0 so it's exact; BG2 parallax is approximate).
     if (ppu->lineHasSprites)
       PpuDrawSprites(ppu, y, sub, true);
 
@@ -730,11 +738,13 @@ static void PpuDrawBackgrounds(Ppu *ppu, int y, bool sub) {
     else
       PpuDrawBackground_4bpp(ppu, y, sub, 1, 0xb100, 0x7100);
 
-    uint bg3prio = PPU_bg3priority(ppu) ? 0xf200 : 0x3200;
-    if (mosaic_size && PPU_mosaicEnabled(ppu, 2))
-      PpuDrawBackground_2bpp_mosaic(ppu, y, sub, 2, bg3prio, 0x1200);
-    else
-      PpuDrawBackground_2bpp(ppu, y, sub, 2, bg3prio, 0x1200);
+    if (mode == 1) {
+      uint bg3prio = PPU_bg3priority(ppu) ? 0xf200 : 0x3200;
+      if (mosaic_size && PPU_mosaicEnabled(ppu, 2))
+        PpuDrawBackground_2bpp_mosaic(ppu, y, sub, 2, bg3prio, 0x1200);
+      else
+        PpuDrawBackground_2bpp(ppu, y, sub, 2, bg3prio, 0x1200);
+    }
   } else {
     // mode 7
     PpuDrawBackground_mode7(ppu, y, sub, 0x5000);
