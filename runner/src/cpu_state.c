@@ -187,6 +187,11 @@ static void cpu_hw_log(uint16 addr, int is_read, uint16 val) {
 }
 
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
+    if ((addr == 0x4218 || addr == 0x4219) && 0) {
+        static int n = 0;
+        if (n++ < 20) fprintf(stderr, "[joyrd8] addr=%04x DB=%02x ramoff=%d hwreg=%d\n",
+                              addr, bank, cpu_ram_offset(bank, addr), is_hw_reg(bank, addr));
+    }
     int off = cpu_ram_offset(bank, addr);
     if (off >= 0) return cpu->ram[off];
     if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 1, 0); return ReadReg(addr); }
@@ -197,6 +202,11 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
+    if ((addr == 0x4218 || addr == 0x4219) && 0) {
+        static int n = 0;
+        if (n++ < 20) fprintf(stderr, "[joyrd16] addr=%04x DB=%02x ramoff=%d hwreg=%d\n",
+                              addr, bank, cpu_ram_offset(bank, addr), is_hw_reg(bank, addr));
+    }
     int off = cpu_ram_offset(bank, addr);
     if (off >= 0 && off + 1 < 0x20000)
         return (uint16)cpu->ram[off] | ((uint16)cpu->ram[off + 1] << 8);
@@ -219,6 +229,10 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
+    if ((addr == 0x1290 || addr == 0x1292) && v && getenv("SF_DBG_JOYRD")) {
+        static int n = 0;
+        if (n++ < 60) fprintf(stderr, "[cont0wr] addr=%04x DB=%02x val=%02x\n", addr, bank, v);
+    }
     int off = cpu_ram_offset(bank, addr);
     if (off >= 0) {
         uint8 old = cpu->ram[off];
