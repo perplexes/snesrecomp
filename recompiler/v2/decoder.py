@@ -1572,7 +1572,14 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                             continue
                         eb = (e >> 16) & 0xFF
                         e16 = e & 0xFFFF
-                        if eb == bank and 0x8000 <= e16 <= 0xFFFF:
+                        # Targets normally live in ROM ($8000+); a relocated
+                        # handler (e.g. Star Fox's X-bank IRQ phase routines
+                        # at $7E:3B7A.. executed from WRAM) sits BELOW $8000,
+                        # so also accept targets inside a reloc region — same
+                        # exception the JSL/JML long-table path makes above.
+                        if eb == bank and (
+                                (0x8000 <= e16 <= 0xFFFF)
+                                or addr_in_reloc_region(eb, e16, reloc_regions) is not None):
                             extra_succs.append(
                                 (DecodeKey(addr24(eb, e16), site_m, site_x, ()),
                                  'jump'))
@@ -1640,7 +1647,9 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                             continue
                         eb = (e >> 16) & 0xFF
                         e16 = e & 0xFFFF
-                        if eb == bank and 0x8000 <= e16 <= 0xFFFF:
+                        if eb == bank and (
+                                (0x8000 <= e16 <= 0xFFFF)
+                                or addr_in_reloc_region(eb, e16, reloc_regions) is not None):
                             labeled_succ.append(
                                 (DecodeKey(addr24(eb, e16), 1, 1, ()),
                                  'jump'))
