@@ -156,8 +156,12 @@ static uint16 s_last_hw_addr = 0;
 static int s_last_hw_was_read = 0;
 static int s_apu_writes_logged = 0;
 
+/* Last generated function entered — set on every entry so a hang can be
+ * attributed to the function the CPU is spinning in (SF bring-up). */
+const char *g_last_funcname = "(none)";
 /* Logger reachable from generated code. Disabled at release. */
 void cpu_dbg_funcname(const char *name) {
+    g_last_funcname = name;
     (void)name;
 #if BUILD_CPU_HW_LOG
     static int n = 0;

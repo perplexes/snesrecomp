@@ -263,6 +263,19 @@ void WriteReg(uint16 reg, uint8 value) {
 
 
 uint8 ReadReg(uint16 reg) {
+  if (getenv("SF_SPIN_TRACE")) {
+    static long s_hist[0x220]; static long s_tot = 0;
+    if (reg >= 0x2100 && reg < 0x2200) s_hist[reg - 0x2100]++;
+    else if (reg >= 0x4200 && reg < 0x4220) s_hist[0x100 + (reg - 0x4200)]++;
+    if (++s_tot % 200000 == 0) {
+      fprintf(stderr, "[spin-hist tot=%ld] ", s_tot);
+      for (int i = 0; i < 0x220; i++) if (s_hist[i] > 5000) {
+        int r = i < 0x100 ? 0x2100 + i : 0x4200 + (i - 0x100);
+        fprintf(stderr, "%04x:%ld ", r, s_hist[i]); s_hist[i] = 0;
+      }
+      fprintf(stderr, "\n"); s_tot = 0;
+    }
+  }
   // Direct dispatch — bypass emulator bus
   // MSU-1 ($2000-$2007). Returns 0 (open bus) when no pack is armed,
   // matching the prior fall-through behaviour exactly.
