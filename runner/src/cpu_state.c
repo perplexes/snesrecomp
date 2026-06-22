@@ -42,6 +42,24 @@ static int cpu_ram_offset(uint8 bank, uint16 addr) {
     if (addr < 0x2000 && (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))) {
         return (int)addr;
     }
+    /* Super-FX DB-drift safety net (Star Fox bring-up). transfer_l and other
+     * boot/main-loop code read WRAM globals ($0000-$1FFF, e.g. transbmp1
+     * $1939, trans_flag $0000) via the data bank. A pre-existing stack-drift
+     * bug in the recompiled boot path leaves DB at a ROM-region bank (observed
+     * $E7) by the time transfer_l runs, so `lda transbmp1` resolves to ROM and
+     * the IRQ-set double-buffer flag is never seen — boot wedges before the
+     * GSU 3D render. On real hardware low WRAM is only mirrored in $00-$3F /
+     * $80-$BF, but a low-address access through a pure-ROM bank ($40-$6F,
+     * $C0-$EF) is never legitimate — it can only be a drifted-DB artifact — so
+     * routing it to WRAM is safe here and unblocks the render pipeline. Scoped
+     * to Super-FX carts (g_gsu_full_ram) and excludes the SRAM/GSU-RAM banks
+     * ($70-$7D / $F0-$FD), which legitimately decode low addresses.
+     * TODO(starfox): remove once the boot-path stack/DB-tracking drift that
+     * leaves DB=$E7 is fixed at the recompiler level. See starfox-boot-progress. */
+    if (g_gsu_full_ram && addr < 0x2000
+        && ((bank >= 0x40 && bank <= 0x6F) || (bank >= 0xC0 && bank <= 0xEF))) {
+        return (int)addr;
+    }
     return -1;
 }
 

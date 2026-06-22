@@ -961,11 +961,17 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
        * never equals an arbitrary target, so the CPU spins forever.
        * Return an advancing line (0..261, wrapping) so any target is
        * reached within one frame of polls. */
-      ppu->hCount = 0;
       if(ppu->latchAutoAdvance) {
         ppu->vCount = ppu->latchLine;
         ppu->latchLine = (ppu->latchLine + 1) > 261 ? 0 : (ppu->latchLine + 1);
+        /* Star Fox also busy-waits on OPHCT ($213C) for the beam to reach a
+         * specific horizontal dot window (e.g. [0x5a,0x64)). Advance the
+         * latched dot 0..339 (wrapping) so every horizontal target is hit
+         * within one scan. */
+        ppu->hCount = ppu->latchDot;
+        ppu->latchDot = (ppu->latchDot + 1) > 339 ? 0 : (ppu->latchDot + 1);
       } else {
+        ppu->hCount = 0;
         ppu->vCount = 0xc0;
       }
       ppu->hCountSecond = false;

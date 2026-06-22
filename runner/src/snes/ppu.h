@@ -145,6 +145,7 @@ struct Ppu {
   // golden-trace behaviour of NMI-driven games (SMW) is unchanged.
   bool latchAutoAdvance;
   uint16_t latchLine;
+  uint16_t latchDot;
   // pixel buffer (xbgr)
   // times 2 for even and odd frame
 

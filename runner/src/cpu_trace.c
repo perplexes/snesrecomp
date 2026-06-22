@@ -1743,6 +1743,25 @@ static int db_watch_hit(uint8_t db) {
 
 void cpu_trace_db_change(CpuState *cpu, uint32_t pc24, uint8_t old_db,
                          uint8_t new_db, uint8_t event_type) {
+    /* DIAGNOSTIC (SF_DB_WATCH): flag when DB is set to a ROM bank ($40-$7F or
+     * $C0-$FF) — never a valid data bank for WRAM/HW-reg access. Pinpoints the
+     * boot-path DB-tracking corruption (observed transfer_l DB=$E7, WAITDMA
+     * DB=$58). Prints the recompiled function that did it. */
+    {
+        static int s_chk = -1;
+        if (s_chk < 0) s_chk = getenv("SF_DB_WATCH") ? 1 : 0;
+        if (s_chk) {
+            int bad = ((new_db >= 0x40 && new_db <= 0x7D) || new_db >= 0xC0);
+            static int s_hits = 0;
+            if (bad && s_hits < 25) {
+                s_hits++;
+                extern const char *g_last_recomp_func;
+                fprintf(stderr, "[DB_WATCH#%d] DB %02X->%02X evt=%d in %s\n",
+                        s_hits, old_db, new_db, event_type,
+                        g_last_recomp_func ? g_last_recomp_func : "?");
+            }
+        }
+    }
     capture(cpu, pc24, event_type, old_db, (uint16_t)new_db);
     int slot = (int)(g_cpu_dbpb_idx++ & (CPU_DBPB_RING_LEN - 1));
     CpuDbpbEvent *d = &g_cpu_dbpb_ring[slot];

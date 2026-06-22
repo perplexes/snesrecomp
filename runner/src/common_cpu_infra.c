@@ -202,6 +202,8 @@ static int g_watchdog_enabled;
 static int g_watchdog_counter;
 jmp_buf g_watchdog_jmp;
 int g_watchdog_tripped;
+CoopIrqPumpFunc g_coop_irq_pump;  /* game-registered cooperative IRQ pump */
+static int g_in_coop_pump;        /* reentrancy guard (pump runs recompiled code) */
 
 void WatchdogFrameStart(void) {
   g_frame_start_clock = clock();
@@ -218,6 +220,21 @@ void WatchdogCheck(void) {
   // Only check clock() every 10000 iterations to avoid overhead
   if (++g_watchdog_counter < 10000) return;
   g_watchdog_counter = 0;
+  /* Cooperative IRQ pump: advance interrupt-only hardware so spin-waits on
+   * IRQ-set flags fall through (see CoopIrqPumpFunc in the header). Guarded
+   * against reentrancy because the pump itself runs recompiled code whose
+   * blocks call WatchdogCheck. Runs during boot too (before the
+   * frame_counter==0 gate below), since Star Fox's boot init already waits
+   * on the IRQ-driven transfer_l double-buffer flags. */
+  if (g_coop_irq_pump && !g_in_coop_pump) {
+    g_in_coop_pump = 1;
+    int progressed = g_coop_irq_pump();
+    g_in_coop_pump = 0;
+    if (progressed) {
+      g_frame_start_clock = clock();  /* we advanced; reset the hang timer */
+      return;
+    }
+  }
   double elapsed = (double)(clock() - g_frame_start_clock) / CLOCKS_PER_SEC;
   /* Boot has no watchdog. I_RESET runs once and uploads the SPC
    * engine + samples through the IPL handshake, which is real-time

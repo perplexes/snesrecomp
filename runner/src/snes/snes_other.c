@@ -114,6 +114,12 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
 
   if (is_superfx) {
     snes->hasGsu = true;
+    // Mirror hasGsu into the CPU-side memory-router flag (cpu_state.c). It
+    // gates the Super-FX Game Pak RAM window (banks $70-$71) and the boot-path
+    // DB-drift safety net in cpu_ram_offset. Declared in common_rtl.h; redeclared
+    // here to avoid pulling the whole RTL header into the snes core.
+    extern bool g_gsu_full_ram;
+    g_gsu_full_ram = true;
     // Star Fox's waitdma_l polls OPVCT for a specific raster line; without a
     // per-scanline PPU clock in the frame-level recomp, advance the latched
     // line on each SLHV read so those waits fall through (see ppu.c case 0x37).

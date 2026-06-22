@@ -27,6 +27,17 @@ typedef void RunOneFrameOfGameFunc(void);
 
 void WatchdogCheck(void);
 void WatchdogFrameStart(void);
+
+/* Cooperative IRQ pump hook (game-agnostic). Some games spin-wait on RAM
+ * flags that ONLY advance inside an interrupt handler (e.g. a vblank/raster
+ * IRQ that DMAs a framebuffer and bumps a double-buffer flag). With no async
+ * interrupt model, the recompiled CPU would spin forever. A game layer may
+ * register a pump here: WatchdogCheck() calls it on each ~10k-iteration tick
+ * (boot included) so the handler runs and the flag advances, letting the
+ * spin fall through. Return nonzero if the pump made progress (resets the
+ * 5s hang timer). Reentrancy is guarded by the framework. NULL = disabled. */
+typedef int (*CoopIrqPumpFunc)(void);
+extern CoopIrqPumpFunc g_coop_irq_pump;
 void RecompStackPush(const char *name);
 void RecompStackPop(void);
 /* Per-frame 65816 entry-S tracking for return-to-ancestor RTS resolution

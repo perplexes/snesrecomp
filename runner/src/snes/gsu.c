@@ -92,8 +92,14 @@ static inline int get_flag(Gsu* g, uint16_t mask) {
 
 static inline uint8_t rom_read(Gsu* g, uint8_t bank, uint16_t addr) {
   if (!g->rom || g->romSize == 0) return 0;
-  uint32_t off = ((uint32_t)bank << 16) | addr;
-  return g->rom[off & (g->romSize - 1)];
+  // LoROM mapping — MUST match the CPU's RomPtr (common_rtl.c): Star Fox is a
+  // LoROM Super FX cart. Banks $00-$3F see ROM at $8000-$FFFF; the GSU program
+  // counter (PBR:R15) addresses the same ROM bytes the CPU does, so the linear
+  // (bank<<16)|addr model fetched the WRONG bytes (e.g. $01:8295 read rom
+  // offset $18295 instead of $8295) — the GSU executed garbage. Use the LoROM
+  // offset = (bank<<15) | (addr & 0x7fff), mirrored to real ROM size.
+  uint32_t off = (((uint32_t)bank << 15) | (addr & 0x7fff)) % g->romSize;
+  return g->rom[off];
 }
 
 static inline uint8_t ram_read(Gsu* g, uint8_t bank, uint16_t addr) {
