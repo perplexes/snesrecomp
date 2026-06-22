@@ -15,6 +15,7 @@ typedef struct Snes Snes;
 #include "dma.h"
 #include "ppu.h"
 #include "cart.h"
+#include "gsu.h"
 #include "saveload.h"
 
 struct Snes {
@@ -23,6 +24,8 @@ struct Snes {
   Ppu* ppu;
   Dma* dma;
   Cart* cart;
+  Gsu* gsu;        // Super FX (GSU / MARIO Chip) — NULL/inert unless hasGsu
+  bool hasGsu;     // set by snes_loadRom when a Super FX ROM is detected
   uint16 input1_currentState;
   uint16 input2_currentState;
   bool disableRender;

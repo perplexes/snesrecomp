@@ -17,6 +17,7 @@
 uint8 g_ram[0x20000];
 uint8 *g_sram;
 int g_sram_size;
+bool g_gsu_full_ram = false;
 const uint8 *g_rom;
 Ppu *g_ppu;
 Dma *g_dma;
@@ -231,6 +232,19 @@ void WriteReg(uint16 reg, uint8 value) {
     debug_server_on_reg_write(reg, value);
     return;
   }
+  if (reg >= 0x3000 && reg < 0x3040) {
+    // Super FX (GSU / MARIO Chip) register window $3000-$303F. Inert unless
+    // a Super FX ROM armed the GSU. Writing R15 ($301E/$301F) launches the
+    // chip; run it synchronously to completion so the host busy-wait on the
+    // SFR GO bit falls through on the next read.
+    if (g_snes->hasGsu) {
+      gsu_write(g_snes->gsu, reg, value);
+      if (reg == 0x301f && gsu_is_running(g_snes->gsu))
+        gsu_run(g_snes->gsu, 0x7fffffff);
+    }
+    debug_server_on_reg_write(reg, value);
+    return;
+  }
   if (reg >= 0x2100 && reg < 0x2140) {
     ppu_write(g_ppu, reg & 0xff, value);
   } else if (reg >= 0x2140 && reg < 0x2180) {
@@ -254,6 +268,10 @@ uint8 ReadReg(uint16 reg) {
   // matching the prior fall-through behaviour exactly.
   if (reg >= 0x2000 && reg < 0x2008) {
     return msu1_enabled() ? msu1_read(reg) : 0;
+  }
+  if (reg >= 0x3000 && reg < 0x3040) {
+    // Super FX register window (see WriteReg). Open bus (0) when no GSU.
+    return g_snes->hasGsu ? gsu_read(g_snes->gsu, reg) : 0;
   }
   if (reg >= 0x2100 && reg < 0x2140) {
     return ppu_read(g_ppu, reg & 0xff);

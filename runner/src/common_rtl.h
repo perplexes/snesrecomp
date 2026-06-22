@@ -27,6 +27,9 @@ void SimpleHdma_DoLine(SimpleHdma *c);
 extern uint8 g_ram[0x20000];
 extern uint8 *g_sram;
 extern int g_sram_size;
+/* When true, banks $70-$71 map the FULL bank to cart RAM (Super FX Game Pak
+ * RAM, e.g. Star Fox's GSU framebuffer at $70:AC00). Set from snes->hasGsu. */
+extern bool g_gsu_full_ram;
 extern const uint8 *g_rom;
 extern Ppu *g_ppu;
 extern Dma *g_dma;

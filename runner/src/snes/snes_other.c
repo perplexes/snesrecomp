@@ -93,12 +93,33 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
     }
     test *= 2;
   }
+  // Super FX (GSU / MARIO Chip) detection: header $FFD6 high nibble == 1.
+  // Star Fox's romtype is $14 (coprocessor=1 SuperFX, type=4 ROM+coproc+RAM).
+  bool is_superfx = (headers[used].coprocessor == 1);
+
+  int ramSize = headers[used].chips > 0 ? (int)headers[used].ramSize : 0;
+  if (is_superfx) {
+    // Game Pak RAM is the GSU's work RAM + framebuffer (Star Fox's bitmap
+    // lives at $70:AC00). The header SRAM byte is tiny/zero, so force a
+    // window large enough to map banks $70-$71 fully (128KB, power of two
+    // for the address mask). Shared with the GSU core below.
+    if (ramSize < 0x20000) ramSize = 0x20000;
+  }
+
   // load it
   cart_load(
     snes->cart, headers[used].cartType,
-    newData, newLength, headers[used].chips > 0 ? headers[used].ramSize : 0
+    newData, newLength, ramSize
   );
-  
+
+  if (is_superfx) {
+    snes->hasGsu = true;
+    gsu_set_memory(snes->gsu, snes->cart->rom, snes->cart->romSize,
+                   snes->cart->ram, snes->cart->ramSize);
+    printf("Super FX (GSU) detected: enabled, %d bytes Game Pak RAM\n",
+           snes->cart->ramSize);
+  }
+
   free(newData);
   return true;
 }

@@ -32,6 +32,8 @@ Snes* snes_init(uint8_t *ram) {
   snes->dma = dma_init(snes);
   snes->ppu = ppu_init();
   snes->cart = cart_init(snes);
+  snes->gsu = gsu_init();
+  snes->hasGsu = false;
   snes->input1_currentState = 0;
   snes->input2_currentState = 0;
   return snes;
@@ -43,6 +45,7 @@ void snes_free(Snes* snes) {
   dma_free(snes->dma);
   ppu_free(snes->ppu);
   cart_free(snes->cart);
+  gsu_free(snes->gsu);
   free(snes);
 }
 
@@ -66,6 +69,7 @@ void snes_reset(Snes* snes, bool hard) {
   apu_reset(snes->apu);
   dma_reset(snes->dma);
   ppu_reset(snes->ppu);
+  if (snes->gsu) gsu_reset(snes->gsu);
   if (hard)
     memset(snes->ram, 0, 0x20000);
   snes->ramAdr = 0;

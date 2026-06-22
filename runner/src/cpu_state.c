@@ -62,6 +62,14 @@ static int is_hw_reg(uint8 bank, uint16 addr) {
  * (which would trip the RomPtr-invalid off-rails detector). */
 static int cpu_sram_offset(uint8 bank, uint16 addr) {
     if (g_sram_size == 0 || g_sram == NULL) return -1;
+    /* Super FX Game Pak RAM: banks $70-$71 (and mirrors $F0-$F1) map the
+     * FULL bank ($0000-$FFFF), not just $0000-$7FFF — Star Fox's GSU
+     * framebuffer lives at $70:AC00 (above $8000). Shared with the GSU
+     * core (gsu_set_memory gets this same buffer). Guarded so non-Super-FX
+     * games keep the stock LoROM/HiROM SRAM windows below. */
+    if (g_gsu_full_ram && ((bank & 0x7E) == 0x70)) {
+        return (int)((((bank & 0x1) << 16) | addr) & (g_sram_size - 1));
+    }
     /* LoROM SRAM: banks $70-$7D + $F0-$FD, addr $0000-$7FFF. */
     if (((bank >= 0x70 && bank < 0x7E) || (bank >= 0xF0 && bank < 0xFE))
         && addr < 0x8000) {

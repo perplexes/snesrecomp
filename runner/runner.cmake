@@ -31,6 +31,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/apu.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/cart.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/cpu.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/snes/gsu.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dma.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dsp.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/audio_shadow.c
