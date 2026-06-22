@@ -130,11 +130,29 @@ static inline void clear_prefixes(Gsu* g) {
   g->sfr &= ~(GSU_SFR_ALT1 | GSU_SFR_ALT2 | GSU_SFR_B);
 }
 
+// Latch the ROM data byte/word at ROMBR:R14 into ROMDR. On real hardware a
+// write to R14 starts a ROM fetch; the byte lands in ROMDR a few cycles later
+// and GETB/GETC read it. We model it as an immediate latch (frame-level recomp
+// has no GSU cycle clock). MUST be called whenever R14 changes, else GETB/GETC
+// read a stale/zero ROMDR and the GSU processes garbage data (observed: 3D
+// data streamed as all-zero -> a bad LOOP count -> the render loop never ends).
+static inline void gsu_latch_romdr(Gsu* g) {
+  // Data reads use the same LoROM mapping as code fetch (rom_read): the GSU
+  // addresses ROM data through ROMBR:R14 just as it fetches code through
+  // PBR:R15.
+  uint8_t lo = rom_read(g, g->rombr, g->r[14]);
+  uint8_t hi = rom_read(g, g->rombr, (uint16_t)(g->r[14] + 1));
+  g->romdr_byte = lo;
+  g->romdr = (uint16_t)(lo | (hi << 8));
+}
+
 // Write a value to the destination register; if Dreg==R15 this is a branch
 // (alters PC). Then apply the standard post-instruction prefix reset.
 static inline void write_dreg(Gsu* g, uint16_t val) {
   g->r[g->dreg] = val;
   // R15 write here just sets PC; GO stays as-is (already running).
+  // A write to R14 triggers the ROM data prefetch (see gsu_latch_romdr).
+  if (g->dreg == 14) gsu_latch_romdr(g);
 }
 
 // ---- Flag computation for ALU ops --------------------------------------
@@ -808,7 +826,10 @@ static int gsu_step(Gsu* g) {
         // RAMB: set RAM bank = Sreg low byte.
         g->rambr = g->r[sreg] & 0xff;
       } else {
-        // GETC: COLOR = last ROM data byte (R14 read latch).
+        // GETC: COLOR = ROM data byte at ROMBR:R14 (R14 read latch). Refresh
+        // from the current R14 in case it changed via INC/DEC/ALU (which do
+        // not go through write_dreg's latch trigger).
+        gsu_latch_romdr(g);
         g->color = g->romdr_byte;
       }
       clear_prefixes(g);
@@ -829,6 +850,9 @@ static int gsu_step(Gsu* g) {
 
     // 0xEF: GETB / GETBH / GETBL / GETBS (ALT variants) — read ROM byte.
     case 0xef: {
+      // Refresh ROMDR from the current R14 (INC/DEC/ALU writes to R14 bypass
+      // write_dreg's latch trigger), then read the byte.
+      gsu_latch_romdr(g);
       uint8_t b = g->romdr_byte;
       uint16_t res;
       if (alt1 && alt2) {

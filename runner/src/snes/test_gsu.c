@@ -301,6 +301,28 @@ static void test_plot(void) {
   printf("  test_plot OK\n");
 }
 
+// GETB reads the ROM data byte at ROMBR:R14. Regression test for the bug where
+// the ROMDR latch was never populated, so GETB/GETC always returned 0 (the GSU
+// processed all-zero model data and the 3D render loop never terminated).
+static void test_getb_rom_data(void) {
+  // FE 00 02   IWT R14,#$0200   ; point the ROM data pointer at $0200
+  // EF         GETB             ; R0 = rom[ROMBR:$0200]
+  // FE 01 02   IWT R14,#$0201   ; advance the pointer
+  // 11         TO R1            ; direct next result to R1
+  // EF         GETB             ; R1 = rom[ROMBR:$0201]
+  // 00         STOP
+  uint8_t prog[] = { 0xFE, 0x00, 0x02, 0xEF, 0xFE, 0x01, 0x02, 0x11, 0xEF, 0x00 };
+  Gsu* g = make_gsu_with_program(prog, sizeof(prog));
+  // ROMBR defaults to 0 after reset; place known data bytes in bank 0.
+  g_rom[0x0200] = 0x12;
+  g_rom[0x0201] = 0x34;
+  launch_and_run(g);
+  CHECK(gsu_get_reg(g, 0) == 0x12);  // first GETB
+  CHECK(gsu_get_reg(g, 1) == 0x34);  // GETB after R14 advanced (on-demand refetch)
+  gsu_free(g);
+  printf("  test_getb_rom_data OK\n");
+}
+
 int main(void) {
   printf("GSU unit tests:\n");
   test_register_window();
@@ -313,6 +335,7 @@ int main(void) {
   test_branch();
   test_nop();
   test_plot();
+  test_getb_rom_data();
   printf("ALL %d CHECKS PASSED\n", g_tests);
   return 0;
 }
