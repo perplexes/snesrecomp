@@ -954,9 +954,20 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
       /* Frame-level recomp runs do not model per-scanline PPU time, but
        * games still use SLHV/OPVCT busy-waits to wait until late visible
        * scanlines before touching HDMA/window tables. Latch a stable
-       * late-line value so those waits can complete. */
+       * late-line value so those waits can complete.
+       *
+       * latchAutoAdvance (Super FX / Star Fox): waitdma_l busy-waits on
+       * OPVCT until it equals a *specific* target line. A static latch
+       * never equals an arbitrary target, so the CPU spins forever.
+       * Return an advancing line (0..261, wrapping) so any target is
+       * reached within one frame of polls. */
       ppu->hCount = 0;
-      ppu->vCount = 0xc0;
+      if(ppu->latchAutoAdvance) {
+        ppu->vCount = ppu->latchLine;
+        ppu->latchLine = (ppu->latchLine + 1) > 261 ? 0 : (ppu->latchLine + 1);
+      } else {
+        ppu->vCount = 0xc0;
+      }
       ppu->hCountSecond = false;
       ppu->vCountSecond = false;
       ppu->countersLatched = true;

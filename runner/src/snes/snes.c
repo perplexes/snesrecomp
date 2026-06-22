@@ -69,6 +69,10 @@ void snes_reset(Snes* snes, bool hard) {
   apu_reset(snes->apu);
   dma_reset(snes->dma);
   ppu_reset(snes->ppu);
+  // ppu_reset memsets the struct, clearing latchAutoAdvance. Re-assert it for
+  // Super FX games: Star Fox's waitdma_l polls OPVCT for a specific raster
+  // line, which never matches a static latch (see ppu.c case 0x37).
+  if (snes->hasGsu && snes->ppu) snes->ppu->latchAutoAdvance = true;
   if (snes->gsu) gsu_reset(snes->gsu);
   if (hard)
     memset(snes->ram, 0, 0x20000);

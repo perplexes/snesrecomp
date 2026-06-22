@@ -114,6 +114,10 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
 
   if (is_superfx) {
     snes->hasGsu = true;
+    // Star Fox's waitdma_l polls OPVCT for a specific raster line; without a
+    // per-scanline PPU clock in the frame-level recomp, advance the latched
+    // line on each SLHV read so those waits fall through (see ppu.c case 0x37).
+    if (snes->ppu) snes->ppu->latchAutoAdvance = true;
     gsu_set_memory(snes->gsu, snes->cart->rom, snes->cart->romSize,
                    snes->cart->ram, snes->cart->ramSize);
     printf("Super FX (GSU) detected: enabled, %d bytes Game Pak RAM\n",

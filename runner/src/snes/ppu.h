@@ -136,6 +136,15 @@ struct Ppu {
   bool hCountSecond;
   bool vCountSecond;
   bool countersLatched;
+  // Opt-in: when true, each SLHV latch ($2137 read) returns a scanline that
+  // advances 0..261 and wraps, instead of the static 0xC0 stub. Frame-level
+  // recomp does not model per-scanline PPU time, but some games (Star Fox /
+  // Super FX) busy-wait on OPVCT for a *specific* raster line; a static value
+  // never matches and the CPU spins forever. Advancing the latched line lets
+  // every such wait fall through within <=262 polls. Off by default so the
+  // golden-trace behaviour of NMI-driven games (SMW) is unchanged.
+  bool latchAutoAdvance;
+  uint16_t latchLine;
   // pixel buffer (xbgr)
   // times 2 for even and odd frame
 
