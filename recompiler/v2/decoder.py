@@ -40,7 +40,7 @@ if str(_RECOMPILER_DIR) not in sys.path:
     sys.path.insert(0, str(_RECOMPILER_DIR))
 
 from snes65816 import (  # noqa: E402
-    decode_insn, lorom_offset, Insn,
+    decode_insn, lorom_offset, addr_to_rom_offset, addr_in_reloc_region, Insn,
     ABS, INDIR, INDIR_X, LONG, IMM,
 )
 
@@ -75,7 +75,7 @@ def _dispatch_target_is_padding(rom: bytes, bank: int, pc16: int,
     standard accept path.
     """
     try:
-        off = lorom_offset(bank, pc16)
+        off = addr_to_rom_offset(bank, pc16)
     except AssertionError:
         return True
     if off + window > len(rom):
@@ -123,8 +123,8 @@ def _autorecover_indirect_dp(rom: bytes, bank: int, func_start: int,
     "wins" is the most recent one before the dispatch. SEP/REP state is
     tracked so M is known when the JMP fires.
     """
-    from snes65816 import (decode_insn, lorom_offset, ABS_X, LONG_X,
-                            ABS_Y, DP)
+    from snes65816 import (decode_insn, lorom_offset, addr_to_rom_offset,
+                            ABS_X, LONG_X, ABS_Y, DP)
     # Most-recent winners per DP slot (offset 0, 1, 2 from dp_addr base).
     # Each is (table_base, table_mode, idx_reg).
     winners: dict = {}
@@ -135,7 +135,7 @@ def _autorecover_indirect_dp(rom: bytes, bank: int, func_start: int,
     scanned = 0
     while pc < site_pc and scanned < max_scan_insns:
         try:
-            off = lorom_offset(bank, pc)
+            off = addr_to_rom_offset(bank, pc)
         except AssertionError:
             return None
         if off >= len(rom):
@@ -249,7 +249,7 @@ def _autorecover_dp_table_count(rom: bytes, bank: int,
             if tbl_pc + 1 > 0xFFFF:
                 break
             try:
-                off = lorom_offset(bank, tbl_pc)
+                off = addr_to_rom_offset(bank, tbl_pc)
             except AssertionError:
                 break
             if off + 1 >= len(rom):
@@ -271,8 +271,8 @@ def _autorecover_dp_table_count(rom: bytes, bank: int,
     count = 0
     for i in range(max_entries):
         try:
-            lo_off = lorom_offset(bank, (lo_base + i) & 0xFFFF)
-            hi_off = lorom_offset(bank, (hi_base + i) & 0xFFFF)
+            lo_off = addr_to_rom_offset(bank, (lo_base + i) & 0xFFFF)
+            hi_off = addr_to_rom_offset(bank, (hi_base + i) & 0xFFFF)
         except AssertionError:
             break
         if max(lo_off, hi_off) >= len(rom):
@@ -281,7 +281,7 @@ def _autorecover_dp_table_count(rom: bytes, bank: int,
         hi = rom[hi_off]
         if bk_base is not None:
             try:
-                bk_off = lorom_offset(bank, (bk_base + i) & 0xFFFF)
+                bk_off = addr_to_rom_offset(bank, (bk_base + i) & 0xFFFF)
             except AssertionError:
                 break
             if bk_off >= len(rom):
@@ -383,7 +383,7 @@ def _autorecover_indirect_xtable(rom: bytes, bank: int, insn,
         if any(tbl_pc >= h for h in inbank_handler_pcs):
             break
         try:
-            off = lorom_offset(bank, tbl_pc & 0xFFFF)
+            off = addr_to_rom_offset(bank, tbl_pc & 0xFFFF)
         except AssertionError:
             break
         if off + entry_size - 1 >= len(rom):
@@ -663,8 +663,8 @@ def _resolve_indirect_dispatch_targets(rom: bytes, bank: int, insn,
         entries: List[int] = []
         for i in range(count):
             try:
-                lo_off = lorom_offset(bank, (lo_base + i) & 0xFFFF)
-                hi_off = lorom_offset(bank, (hi_base + i) & 0xFFFF)
+                lo_off = addr_to_rom_offset(bank, (lo_base + i) & 0xFFFF)
+                hi_off = addr_to_rom_offset(bank, (hi_base + i) & 0xFFFF)
             except AssertionError:
                 return None
             if max(lo_off, hi_off) >= len(rom):
@@ -673,7 +673,7 @@ def _resolve_indirect_dispatch_targets(rom: bytes, bank: int, insn,
             hi = rom[hi_off]
             if bk_base is not None:
                 try:
-                    bk_off = lorom_offset(bank, (bk_base + i) & 0xFFFF)
+                    bk_off = addr_to_rom_offset(bank, (bk_base + i) & 0xFFFF)
                 except AssertionError:
                     return None
                 if bk_off >= len(rom):
@@ -697,7 +697,7 @@ def _resolve_indirect_dispatch_targets(rom: bytes, bank: int, insn,
         if tbl_pc + entry_size - 1 > 0xFFFF:
             return None
         try:
-            off = lorom_offset(bank, tbl_pc & 0xFFFF)
+            off = addr_to_rom_offset(bank, tbl_pc & 0xFFFF)
         except AssertionError:
             return None
         if off + entry_size - 1 >= len(rom):
@@ -906,7 +906,7 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
                 mode_set = None
             if mode_set and rom is not None:
                 try:
-                    next_off = lorom_offset(bank, next_pc)
+                    next_off = addr_to_rom_offset(bank, next_pc)
                     next_ins = decode_insn(
                         rom, next_off, next_pc, bank, m=post_m, x=post_x)
                 except Exception:
@@ -947,8 +947,8 @@ def classify_dispatch_helper(rom: bytes, bank: int, addr: int):
     AND #$FFFF in $00:86DF gets sliced into AND #$FF + BRK $0A, eating
     the ASL A that's the classifier's signature.
     """
-    from snes65816 import (decode_insn, lorom_offset, ACC, INDIR, INDIR_X,
-                            INDIR_L)
+    from snes65816 import (decode_insn, lorom_offset, addr_to_rom_offset,
+                            ACC, INDIR, INDIR_X, INDIR_L)
     insns = []
     pc = addr & 0xFFFF
     m, x = 1, 1
@@ -958,7 +958,7 @@ def classify_dispatch_helper(rom: bytes, bank: int, addr: int):
         if not (0x8000 <= pc <= 0xFFFF):
             return None
         try:
-            offset = lorom_offset(bank, pc)
+            offset = addr_to_rom_offset(bank, pc)
         except AssertionError:
             return None
         if offset >= len(rom):
@@ -1115,6 +1115,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                     callee_exit_mx: Optional[Dict] = None,
                     callee_exit_mx_modes: Optional[Dict] = None,
                     sibling_entry_pcs: Optional[set] = None,
+                    reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
                     ) -> "FunctionDecodeGraph":
     """Public cached wrapper around `_decode_function_uncached`.
 
@@ -1134,6 +1135,7 @@ def decode_function(rom: bytes, bank: int, start: int,
             callee_exit_mx=callee_exit_mx,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_entry_pcs,
+            reloc_regions=reloc_regions,
         )
 
     cache_key = (
@@ -1146,6 +1148,12 @@ def decode_function(rom: bytes, bank: int, start: int,
         id(callee_exit_mx) if callee_exit_mx is not None else 0,
         id(callee_exit_mx_modes) if callee_exit_mx_modes is not None else 0,
         id(sibling_entry_pcs) if sibling_entry_pcs is not None else 0,
+        # reloc_regions changes which bytes back an address — a stale cache
+        # hit must not mix relocated and non-relocated decodes of the same
+        # (pc, m, x). Freeze the regions (small list of int 5-tuples) into
+        # the key directly rather than id() so structurally-equal region
+        # sets share cache entries and distinct ones never collide.
+        _freeze(reloc_regions) if reloc_regions else 0,
     )
     cached = _DECODE_CACHE.get(cache_key)
     if cached is not None:
@@ -1166,6 +1174,7 @@ def decode_function(rom: bytes, bank: int, start: int,
         callee_exit_mx=callee_exit_mx,
         callee_exit_mx_modes=callee_exit_mx_modes,
         sibling_entry_pcs=sibling_entry_pcs,
+        reloc_regions=reloc_regions,
     )
     _DECODE_CACHE[cache_key] = graph
     return graph
@@ -1183,6 +1192,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     callee_exit_mx: Optional[Dict] = None,
                     callee_exit_mx_modes: Optional[Dict] = None,
                     sibling_entry_pcs: Optional[set] = None,
+                    reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
                     ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
@@ -1296,12 +1306,21 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                 and edge_kind == 'jump'
                 and pc in sibling_entry_pcs):
             continue
-        if not (0x8000 <= pc <= 0xFFFF):
+        # Address-range gate. Normally a local PC must be in LoROM code
+        # space ($8000-$FFFF); anything else is an out-of-bank/RAM ref we
+        # skip. BUT a reloc region (code copied ROM->WRAM, executed at the
+        # WRAM address) lives BELOW $8000 (Star Fox irqcode_l @ $7E:321F),
+        # so an address inside a registered region is a valid decode target
+        # even though pc < $8000 — the bytes come from the ROM source.
+        in_reloc = addr_in_reloc_region(bank, pc, reloc_regions) is not None
+        if not in_reloc and not (0x8000 <= pc <= 0xFFFF):
             # Out-of-bank reference; surface upstream by skipping here.
             continue
 
         try:
-            offset = lorom_offset(bank, pc)
+            # addr_to_rom_offset translates a reloc-region address to its
+            # ROM source byte; falls back to lorom_offset for normal banks.
+            offset = addr_to_rom_offset(bank, pc, reloc_regions)
         except AssertionError:
             continue
         if offset >= len(rom):
@@ -1333,7 +1352,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
             tbl_pc = (pc + insn.length) & 0xFFFF
             while len(entries) < 256 and tbl_pc + entry_size - 1 <= 0xFFFF:
                 try:
-                    tbl_off = lorom_offset(bank, tbl_pc)
+                    tbl_off = addr_to_rom_offset(bank, tbl_pc, reloc_regions)
                 except AssertionError:
                     break
                 if tbl_off + entry_size - 1 >= len(rom):
@@ -1362,7 +1381,11 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     # ($00-$3F or $80-$FF) with addr16 >= 0x8000. The
                     # `_dispatch_target_is_padding` gate below catches
                     # genuine table-end junk.
-                    if addr16 < 0x8000:
+                    # A relocated handler executes BELOW $8000 (e.g. a $7E
+                    # WRAM target), so don't reject it on the addr-range
+                    # gate when (eb, addr16) is inside a reloc region.
+                    if (addr16 < 0x8000
+                            and addr_in_reloc_region(eb, addr16, reloc_regions) is None):
                         break
                     is_valid_lorom_bank = (eb < 0x40) or (eb >= 0x80)
                     if not is_valid_lorom_bank:
@@ -1390,7 +1413,9 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                         entries.append(0)
                         tbl_pc += entry_size
                         continue
-                    if addr16 < 0x8000:
+                    # Reloc handlers execute below $8000 — keep them.
+                    if (addr16 < 0x8000
+                            and addr_in_reloc_region(bank, addr16, reloc_regions) is None):
                         break
                     if _dispatch_target_is_padding(rom, bank, addr16):
                         break
@@ -1503,7 +1528,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     and (insn.operand & 0xFFFF) >= 0x8000):
                 tbl_pc = insn.operand & 0xFFFF
                 try:
-                    tbl_off = lorom_offset(bank, tbl_pc)
+                    tbl_off = addr_to_rom_offset(bank, tbl_pc, reloc_regions)
                     rom_ok = tbl_off + (3 if insn.length == 4 else 2) - 1 < len(rom)
                 except AssertionError:
                     rom_ok = False
@@ -1707,7 +1732,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     if tbl_pc + entry_size - 1 > 0xFFFF:
                         break
                     try:
-                        tbl_off = lorom_offset(bank, tbl_pc)
+                        tbl_off = addr_to_rom_offset(bank, tbl_pc, reloc_regions)
                     except AssertionError:
                         break
                     if tbl_off + entry_size - 1 >= len(rom):

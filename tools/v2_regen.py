@@ -36,6 +36,7 @@ from v2.cfg_loader import load_bank_cfg  # noqa: E402
 from v2.codegen import (  # noqa: E402
     set_name_resolver,
     set_rom_size,
+    set_reloc_regions,
     set_force_variant_at,
     set_valid_variants,
     set_trampoline_returns,
@@ -639,6 +640,13 @@ def _emit_bank_one(args_dict: dict) -> dict:
     set_force_variant_at(args_dict['force_variant_at'])
     set_valid_variants(args_dict.get('valid_variants') or {})
     set_trampoline_returns(args_dict['trampoline_returns'])
+    # Worker processes don't share the main process's module-level reloc
+    # registry — re-apply it here (mirrors set_rom_size etc.). Covers both
+    # the snes65816 byte-fetch helpers and codegen call-target validation.
+    _reloc = args_dict.get('reloc_regions') or None
+    from snes65816 import set_active_reloc_regions  # noqa: E402
+    set_active_reloc_regions(_reloc)
+    set_reloc_regions(_reloc)
 
     bank = args_dict['bank']
     cfg = args_dict['cfg']
@@ -677,7 +685,8 @@ def _emit_bank_one(args_dict: dict) -> dict:
                         hle_func=getattr(
                             cfg, 'hle_func', None) or None,
                         hle_dispatch=getattr(
-                            cfg, 'hle_dispatch', None) or None)
+                            cfg, 'hle_dispatch', None) or None,
+                        reloc_regions=args_dict.get('reloc_regions') or None)
     except Exception as e:
         return {
             'bank': bank,
@@ -852,6 +861,28 @@ def main() -> int:
             addr = nd.addr_24 & 0xFFFFFF
             name_map[addr] = nd.name
             cross_bank_names.setdefault((addr >> 16) & 0xFF, []).append(nd)
+
+    # Build the GLOBAL code-reloc map from every cfg's `reloc` directives.
+    # A reloc region (RAM-executed-from-ROM, e.g. Star Fox's irqcode at
+    # $7E:321F copied from ROM $02:8000) must be visible to EVERY bank's
+    # decode — a call from bank $00 into $7E:321F has to resolve, and the
+    # $7E bank's own decode must fetch bytes from the ROM source. Each
+    # tuple is (ram_bank, ram_addr, rom_bank, rom_off, length). Registered
+    # process-wide via snes65816.set_active_reloc_regions (so the byte-fetch
+    # helpers see it) and codegen.set_reloc_regions (so call-target
+    # validation accepts the RAM addresses), threaded explicitly into
+    # emit_bank for the decode-loop gates + cache key.
+    reloc_regions: list = []
+    for _bank, _cfg_path, _cfg in parsed:
+        if getattr(_cfg, 'reloc_regions', None):
+            reloc_regions.extend(_cfg.reloc_regions)
+    from snes65816 import set_active_reloc_regions  # noqa: E402
+    set_active_reloc_regions(reloc_regions or None)
+    set_reloc_regions(reloc_regions or None)
+    if reloc_regions:
+        for (rb, ra, srcb, srco, ln) in reloc_regions:
+            print(f"  reloc: ${rb:02X}:{ra:04X} <- ROM ${srcb:02X}:{srco:04X} "
+                  f"len ${ln:04X}")
 
     # Expand `auto_vectors` cfg directive: read the SNES interrupt-
     # vector table at ROM offset 0x7FE0-0x7FFF (LoROM mirror of
@@ -1607,6 +1638,7 @@ def main() -> int:
                 'trampoline_returns': cumulative_trampoline_returns,
                 'callee_exit_mx': callee_exit_mx,
                 'callee_exit_mx_modes': callee_exit_mx_modes,
+                'reloc_regions': reloc_regions or None,
             })
 
         # Run emit. Pool path used when --jobs > 1 and there's more

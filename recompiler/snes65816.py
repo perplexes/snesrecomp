@@ -23,6 +23,98 @@ def lorom_offset(bank: int, addr: int) -> int:
     assert 0x8000 <= addr <= 0xFFFF, f"addr ${addr:04X} not in LoROM range $8000-$FFFF"
     return (bank & 0x7F) * 0x8000 + (addr - 0x8000)
 
+# ==============================================================================
+# CODE RELOCATION (RAM-executed-from-ROM regions)
+# ==============================================================================
+#
+# Some games copy a block of code from ROM into WRAM at boot and execute it
+# there (Star Fox copies ~23KB from ROM $02:8000 into WRAM $7E:321F, runs
+# irqcode_l etc. at the $7E execution addresses). The mapping is exact and
+# linear: WRAM ram_addr+k == ROM rom_off+k for k in [0, length).
+#
+# To decode such code we must FETCH the bytes from the ROM source but keep
+# ALL logical addresses (Insn.addr, DecodeKey.pc, names, symbols, call
+# targets) at the WRAM execution address. `lorom_offset` can't do this — it
+# asserts addr>=$8000 and uses bank&0x7F, so a $7E:321F address has no valid
+# ROM offset of its own.
+#
+# A "reloc region" is a 5-tuple (ram_bank, ram_addr, rom_bank, rom_off, len).
+# `addr_to_rom_offset(bank, addr, reloc_regions)` is the single byte-fetch
+# translator: if (bank, addr) falls inside a registered region, it returns
+# the ROM offset of the corresponding source byte; otherwise it falls back to
+# plain `lorom_offset`. Normal (non-relocated) banks are unaffected.
+#
+# Threading model: reloc_regions is passed explicitly through the decode call
+# graph (decode_function kwarg) AND mirrored into a module-level set-once
+# REGISTRY here. The registry exists because the decoder reaches the byte
+# funnel through many small helper functions (_dispatch_target_is_padding,
+# _autorecover_*, classify_dispatch_helper, ...) that each call lorom_offset;
+# threading a kwarg through every one of them would be sprawling. Instead
+# those helpers call `addr_to_rom_offset(bank, pc, _ACTIVE_RELOC_REGIONS)` and
+# the registry supplies the active set. The registry is process-local and
+# set once per regen run (workers re-apply it from args_dict); within a run it
+# never changes, so it does not need per-phase clearing. The explicit
+# decode_function kwarg is still the source of truth for the decode-loop gate
+# decisions and the decode cache key.
+
+# (ram_bank, ram_addr, rom_bank, rom_off, length) tuples.
+_ACTIVE_RELOC_REGIONS: list = []
+
+
+def set_active_reloc_regions(regions) -> None:
+    """Install the process-local active reloc-region registry.
+
+    Set once per regen run (and re-applied in each multiprocessing worker).
+    Pass None/empty to clear. See the module comment above for the threading
+    rationale (helpers consult the registry; the decode loop also threads an
+    explicit kwarg for gate decisions + cache keying)."""
+    global _ACTIVE_RELOC_REGIONS
+    _ACTIVE_RELOC_REGIONS = list(regions) if regions else []
+
+
+def addr_in_reloc_region(bank: int, addr: int, reloc_regions=None):
+    """Return the matching reloc region tuple for (bank, addr), or None.
+
+    `reloc_regions` is a list of (ram_bank, ram_addr, rom_bank, rom_off,
+    length) tuples. When None, the module-level registry is consulted. A
+    match means addr is in [ram_addr, ram_addr+length) for the given
+    ram_bank."""
+    regions = _ACTIVE_RELOC_REGIONS if reloc_regions is None else reloc_regions
+    if not regions:
+        return None
+    bank &= 0xFF
+    addr &= 0xFFFF
+    for region in regions:
+        ram_bank, ram_addr, rom_bank, rom_off, length = region
+        if (ram_bank & 0xFF) != bank:
+            continue
+        if (ram_addr & 0xFFFF) <= addr < ((ram_addr & 0xFFFF) + length):
+            return region
+    return None
+
+
+def addr_to_rom_offset(bank: int, addr: int, reloc_regions=None) -> int:
+    """Map (bank, addr) to a physical ROM byte offset, reloc-aware.
+
+    If (bank, addr) is inside a registered reloc region, return the ROM
+    offset of the corresponding SOURCE byte:
+        lorom_offset(rom_bank, rom_off) + (addr - ram_addr)
+    computed against the region's ROM-side (rom_bank, rom_off) base — so a
+    $7E:321F address fetches from ROM $02:8000+(addr-$321F).
+
+    Otherwise fall back to plain `lorom_offset(bank, addr)` (which keeps its
+    $8000<=addr assertion for normal banks). reloc_regions defaults to the
+    module-level registry; callers in the decode loop pass it explicitly."""
+    region = addr_in_reloc_region(bank, addr, reloc_regions)
+    if region is not None:
+        _ram_bank, ram_addr, rom_bank, rom_off, _length = region
+        delta = (addr & 0xFFFF) - (ram_addr & 0xFFFF)
+        # rom_off is a normal LoROM ROM address ($8000+) in rom_bank; the
+        # source byte is delta past it.
+        return lorom_offset(rom_bank, rom_off) + delta
+    return lorom_offset(bank, addr)
+
+
 def rom_slice(rom: bytes, bank: int, addr: int, length: int) -> bytes:
     off = lorom_offset(bank, addr)
     return rom[off:off + length]

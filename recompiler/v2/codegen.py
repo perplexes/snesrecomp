@@ -69,11 +69,41 @@ _UNRESOLVED_CALL_TARGETS: set = set()
 _ROM_SIZE: int = 0
 _REJECTED_CALL_TARGETS: set = set()
 
+# Active code-reloc regions (RAM-executed-from-ROM). List of
+# (ram_bank, ram_addr, rom_bank, rom_off, length) tuples. Set once per
+# regen run by v2_regen (re-applied in each worker). Used by
+# _is_invalid_lorom_call_target so a `jsl $7E321F` into a relocated
+# region resolves to the real recompiled handler instead of being
+# rejected as an out-of-ROM target. Mirrors snes65816's registry but is
+# codegen-local because codegen's validation runs without a decode kwarg.
+_RELOC_REGIONS: list = []
+
 
 def set_rom_size(size: int) -> None:
     """Set the ROM size used for JSR/JSL target validation."""
     global _ROM_SIZE
     _ROM_SIZE = int(size)
+
+
+def set_reloc_regions(regions) -> None:
+    """Install the codegen-local reloc-region map. Pass None/empty to
+    clear. See _RELOC_REGIONS doc + _is_invalid_lorom_call_target."""
+    global _RELOC_REGIONS
+    _RELOC_REGIONS = list(regions) if regions else []
+
+
+def _addr_in_reloc_region(addr_24: int) -> bool:
+    """True iff addr_24's (bank, pc16) is inside any active reloc region."""
+    if not _RELOC_REGIONS:
+        return False
+    bank = (addr_24 >> 16) & 0xFF
+    pc16 = addr_24 & 0xFFFF
+    for (ram_bank, ram_addr, _rb, _ro, length) in _RELOC_REGIONS:
+        if (ram_bank & 0xFF) != bank:
+            continue
+        if (ram_addr & 0xFFFF) <= pc16 < ((ram_addr & 0xFFFF) + length):
+            return True
+    return False
 
 
 # Per-call-site variant pin, populated from per-bank cfg
@@ -175,7 +205,14 @@ def _is_invalid_lorom_call_target(addr_24: int) -> bool:
 
     With _ROM_SIZE unset (== 0) we only apply rule 1 to stay safe in
     unit-test contexts that don't load a ROM.
+
+    EXCEPTION: an address inside a registered code-reloc region executes
+    from RAM (e.g. WRAM $7E) but is backed by real ROM bytes — it is a
+    valid call target even though pc < $8000 and the canonical-bank ROM
+    offset rule doesn't apply. Star Fox: `jsl $7E321F` -> irqcode_l.
     """
+    if _addr_in_reloc_region(addr_24):
+        return False
     pc = addr_24 & 0xFFFF
     if pc < 0x8000:
         return True

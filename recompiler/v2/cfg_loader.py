@@ -60,6 +60,18 @@ class BankCfg:
     names: List[NameDecl] = field(default_factory=list)
     exclude_ranges: List[Tuple[int, int]] = field(default_factory=list)
     data_regions: List[Tuple[int, int, int]] = field(default_factory=list)  # (bank, start, end)
+    # `reloc <ram_bank> <ram_addr> <rom_bank> <rom_off> <len>` directives —
+    # declare a region of code that EXECUTES from RAM (e.g. WRAM $7E) but was
+    # COPIED there from ROM at boot. The mapping is exact/linear:
+    # ram_addr+k == rom_off+k for k in [0, len). The decoder fetches bytes
+    # from the ROM source but keeps ALL addresses (Insn.addr, DecodeKey.pc,
+    # names, emitted symbols, call targets) at the RAM execution address.
+    # Star Fox: `reloc 7E 321F 02 8000 5C00` — irqcode_l runs at $7E:321F,
+    # bytes come from ROM $02:8000. Each tuple is
+    # (ram_bank, ram_addr, rom_bank, rom_off, length). Consumed by v2_regen
+    # (builds a global reloc map), threaded into the decoder, and used by
+    # snes65816.addr_to_rom_offset as the byte-fetch translator.
+    reloc_regions: List[Tuple[int, int, int, int, int]] = field(default_factory=list)
     # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
     # exit (m, x) state of a function at that PC. Decoder uses this to
     # resume callers after JSR/JSL with the correct (m, x) instead of
@@ -480,6 +492,35 @@ def load_bank_cfg(path: str) -> BankCfg:
                 bank_id = (addr_24 >> 16) & 0xFF
                 addr16 = addr_24 & 0xFFFF
                 cfg.exit_mx_at.append((bank_id, addr16, m_val, x_val))
+                continue
+
+            # reloc <ram_bank> <ram_addr> <rom_bank> <rom_off> <len>
+            #
+            # Register a RAM-executed-from-ROM region (see BankCfg.
+            # reloc_regions). All five operands are hex. The region maps
+            # ram_addr+k -> rom_off+k (k in [0,len)); the decoder fetches
+            # bytes from ROM but addresses everything at the RAM address.
+            if head == 'reloc':
+                if len(tokens) != 6:
+                    raise ValueError(
+                        f"{path}: reloc needs <ram_bank> <ram_addr> "
+                        f"<rom_bank> <rom_off> <len> (5 hex args), "
+                        f"got: {stripped!r}")
+                try:
+                    ram_bank = _parse_hex(tokens[1]) & 0xFF
+                    ram_addr = _parse_hex(tokens[2]) & 0xFFFF
+                    rom_bank = _parse_hex(tokens[3]) & 0xFF
+                    rom_off = _parse_hex(tokens[4]) & 0xFFFF
+                    length = _parse_hex(tokens[5])
+                except ValueError as e:
+                    raise ValueError(
+                        f"{path}: reloc bad hex operand: {e}")
+                if length <= 0:
+                    raise ValueError(
+                        f"{path}: reloc length must be positive, got "
+                        f"${length:X}")
+                cfg.reloc_regions.append(
+                    (ram_bank, ram_addr, rom_bank, rom_off, length))
                 continue
 
             # data_region <bank> <start> <end>

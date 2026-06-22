@@ -175,6 +175,7 @@ def scan_tail_call_stack_delta(
         indirect_dispatch=None,
         callee_exit_mx=None,
         callee_exit_mx_modes=None,
+        reloc_regions=None,
 ) -> Dict[int, int]:
     """Compute the net cpu->S delta at every same-bank tail-call exit.
 
@@ -207,6 +208,7 @@ def scan_tail_call_stack_delta(
             callee_exit_mx=callee_exit_mx,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_entry_pcs,
+            reloc_regions=reloc_regions,
         )
     except Exception:
         return {}
@@ -291,6 +293,7 @@ def scan_rts_stack_deltas(
         indirect_dispatch=None,
         callee_exit_mx=None,
         callee_exit_mx_modes=None,
+        reloc_regions=None,
 ) -> Optional[int]:
     """Compute the net cpu->S delta from function entry to all RTS/RTL exits.
 
@@ -314,6 +317,7 @@ def scan_rts_stack_deltas(
             callee_exit_mx=callee_exit_mx,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_entry_pcs or set(),
+            reloc_regions=reloc_regions,
         )
     except Exception:
         return None
@@ -394,6 +398,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                   hle_spc_upload=None,
                   hle_func=None,
                   hle_dispatch=None,
+                  reloc_regions=None,
                   entry_s_offset: int = 0) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
@@ -469,7 +474,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                             data_regions=data_regions,
                             callee_exit_mx=callee_exit_mx,
                             callee_exit_mx_modes=callee_exit_mx_modes,
-                            sibling_entry_pcs=sibling_entry_pcs)
+                            sibling_entry_pcs=sibling_entry_pcs,
+                            reloc_regions=reloc_regions)
     # Forward any suppressed indirect calls upward so emit_bank can
     # aggregate them into the build report. List-of-records.
     if suppressed_collector is not None:
