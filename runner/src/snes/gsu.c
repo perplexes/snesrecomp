@@ -128,6 +128,12 @@ static inline uint8_t ram_read(Gsu* g, uint8_t bank, uint16_t addr) {
 static inline void ram_write(Gsu* g, uint8_t bank, uint16_t addr, uint8_t v) {
   if (!g->ram || g->ramSize == 0) return;
   uint32_t off = ((uint32_t)bank << 16) | addr;
+  if (getenv("GSU_RAMWR")) {
+    static int s_nw = 0; long lim = atol(getenv("GSU_RAMWR"));
+    if (s_nw < lim) { s_nw++;
+      fprintf(stderr, "[ramwr] rambr=%02x addr=%04x off=%05x val=%02x pc=%02x:%04x\n",
+              bank, addr, off & (g->ramSize - 1), v, g->pbr, g->r[15]); }
+  }
   g->ram[off & (g->ramSize - 1)] = v;
 }
 
@@ -939,26 +945,31 @@ static int gsu_step_inner(Gsu* g) {
       return 1;
     }
 
-    // 0xF0-0xFF: IWT Rn,#imm16 / LM / SM (ALT1=SM, ALT2=LM)
+    // 0xF0-0xFF: IWT Rn,#imm16 / LM / SM (canonical: ALT1=LM load, ALT2=SM
+    // store — same load=ALT1/store=ALT2 convention as LMS/SMS at 0xA0). These
+    // were previously swapped, which inverted mbumwipe's `lm r14,[m_wintabptr]`
+    // (load) into a store and `sm [m_wintabptr],r14` (store) into a load, so the
+    // GSU never loaded the wipe-table pointer and the title/intro wipe (and
+    // every other LM/SM-using routine) walked garbage and never advanced.
     case 0xf0: case 0xf1: case 0xf2: case 0xf3:
     case 0xf4: case 0xf5: case 0xf6: case 0xf7:
     case 0xf8: case 0xf9: case 0xfa: case 0xfb:
     case 0xfc: case 0xfd: case 0xfe: case 0xff: {
       int rn = op & 0x0f;
       if (alt1) {
-        // SM (Rm),Rn? canonical SM stores Rn to (xx) absolute word addr.
-        uint16_t lo = fetch(g);
-        uint16_t hi = fetch(g);
-        uint16_t addr = lo | (hi << 8);
-        ram_write(g, g->rambr, addr, g->r[rn] & 0xff);
-        ram_write(g, g->rambr, addr + 1, g->r[rn] >> 8);
-      } else if (alt2) {
-        // LM: load Rn from absolute word addr.
+        // LM Rn,(xx): load Rn word from RAM at absolute word addr.
         uint16_t lo = fetch(g);
         uint16_t hi = fetch(g);
         uint16_t addr = lo | (hi << 8);
         uint16_t v = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
         if (rn == 15) set_r15_deferred(g, v); else g->r[rn] = v;
+      } else if (alt2) {
+        // SM (xx),Rn: store Rn word to RAM at absolute word addr.
+        uint16_t lo = fetch(g);
+        uint16_t hi = fetch(g);
+        uint16_t addr = lo | (hi << 8);
+        ram_write(g, g->rambr, addr, g->r[rn] & 0xff);
+        ram_write(g, g->rambr, addr + 1, g->r[rn] >> 8);
       } else {
         // IWT Rn,#imm16 : load immediate word (little-endian).
         uint16_t lo = fetch(g);
