@@ -215,8 +215,12 @@ static uint8_t rpix_pixel_8bpp(Gsu* g, int x, int y) {
 
 // ---- Lifecycle ---------------------------------------------------------
 
+long g_gsu_trace_budget = 0;
+
 Gsu* gsu_init(void) {
   Gsu* g = (Gsu*)calloc(1, sizeof(Gsu));
+  const char* t = getenv("GSU_TRACE");
+  if (t) g_gsu_trace_budget = atol(t);
   gsu_reset(g);
   return g;
 }
@@ -308,6 +312,17 @@ static void do_branch(Gsu* g, int take) {
 //
 // Executes one opcode. Returns the number of GSU cycles (approx 1 here).
 static int gsu_step(Gsu* g) {
+#ifndef GSU_NO_TRACE
+  /* Env-gated single-step trace (GSU_TRACE=N logs the first N instructions to
+   * stderr as "GSU pbr:r15 op=.. sfr=.."). Debug aid for boot bring-up. */
+  extern long g_gsu_trace_budget;
+  if (g_gsu_trace_budget > 0) {
+    g_gsu_trace_budget--;
+    fprintf(stderr, "GSU %02x:%04x op=%02x sfr=%04x r1=%04x r2=%04x cbr=%02x%02x\n",
+            g->pbr, g->r[15], rom_read(g, g->pbr, g->r[15]), g->sfr,
+            g->r[1], g->r[2], g->cbr_hi, g->cbr_lo);
+  }
+#endif
   uint8_t op = fetch(g);
   // Snapshot prefix state for THIS instruction.
   int alt1 = get_flag(g, GSU_SFR_ALT1);
