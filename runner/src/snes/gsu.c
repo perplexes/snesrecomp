@@ -117,9 +117,14 @@ static inline uint8_t ram_read(Gsu* g, uint8_t bank, uint16_t addr) {
   if (!g->ram || g->ramSize == 0) return 0;
   uint32_t off = ((uint32_t)bank << 16) | addr;
   uint8_t v = g->ram[off & (g->ramSize - 1)];
-  if (getenv("GSU_RAMRD")) {
-    static int s_n = 0; long lim = atol(getenv("GSU_RAMRD"));
-    if (s_n < lim) { s_n++;
+  // Cache the env lookup once: getenv() takes a locked linear scan of the
+  // environment, and this is the GSU's per-pixel/per-access hot path — calling
+  // it every RAM read throttled the GSU to ~1 fps and stalled boot.
+  static long s_rd_lim = -1;
+  if (s_rd_lim < 0) { const char* e = getenv("GSU_RAMRD"); s_rd_lim = e ? atol(e) : 0; }
+  if (s_rd_lim > 0) {
+    static long s_n = 0;
+    if (s_n < s_rd_lim) { s_n++;
       fprintf(stderr, "[ramrd] rambr=%02x addr=%04x off=%05x val=%02x pc=%02x:%04x\n",
               bank, addr, off & (g->ramSize - 1), v, g->pbr, g->r[15]); }
   }
@@ -128,9 +133,13 @@ static inline uint8_t ram_read(Gsu* g, uint8_t bank, uint16_t addr) {
 static inline void ram_write(Gsu* g, uint8_t bank, uint16_t addr, uint8_t v) {
   if (!g->ram || g->ramSize == 0) return;
   uint32_t off = ((uint32_t)bank << 16) | addr;
-  if (getenv("GSU_RAMWR")) {
-    static int s_nw = 0; long lim = atol(getenv("GSU_RAMWR"));
-    if (s_nw < lim) { s_nw++;
+  // Cache the env lookup once (see ram_read): this is the GSU's per-pixel write
+  // hot path; an unconditional getenv() here is a severe boot-time slowdown.
+  static long s_wr_lim = -1;
+  if (s_wr_lim < 0) { const char* e = getenv("GSU_RAMWR"); s_wr_lim = e ? atol(e) : 0; }
+  if (s_wr_lim > 0) {
+    static long s_nw = 0;
+    if (s_nw < s_wr_lim) { s_nw++;
       fprintf(stderr, "[ramwr] rambr=%02x addr=%04x off=%05x val=%02x pc=%02x:%04x\n",
               bank, addr, off & (g->ramSize - 1), v, g->pbr, g->r[15]); }
   }
@@ -767,11 +776,19 @@ static int gsu_step_inner(Gsu* g) {
     case 0x98: case 0x99: case 0x9a: case 0x9b:
     case 0x9c: case 0x9d: {
       int rn = op & 0x0f;
-      g->branch_target = g->r[rn];
+      if (alt1) {
+        // LJMP Rn (canonical Super FX): the OPERAND register Rn supplies the
+        // program bank (PBR = Rn & 0x7f), and SREG supplies the offset
+        // (R15 = SREG). These were previously swapped, corrupting every
+        // cross-bank GSU jump (Star Fox's rasterizer dispatch uses LJMP).
+        g->branch_target = g->r[sreg];
+        g->branch_pbr    = g->r[rn] & 0x7f;
+      } else {
+        // JMP Rn: R15 = Rn, same program bank.
+        g->branch_target = g->r[rn];
+        g->branch_pbr    = -1;
+      }
       g->branch_pending = true;
-      // LJMP: PBR = Sreg low byte (deferred until the redirect, so the delay
-      // slot still executes from the current program bank).
-      g->branch_pbr = alt1 ? (g->r[sreg] & 0xff) : -1;
       clear_prefixes(g);
       return 1;
     }
@@ -1023,7 +1040,36 @@ static int gsu_step(Gsu* g) {
 
 void gsu_run(Gsu* g, int maxCycles) {
   int cycles = 0;
+  // Diagnostic watchdog: if a single synchronous run exceeds GSU_WATCHDOG
+  // cycles, it almost certainly means the GSU program is looping without
+  // reaching STOP. Print a small PC histogram so the loop site is visible,
+  // then force-return so the CPU/IRQ pump can make progress. Env-gated; the
+  // lookup is cached so production builds pay only one int compare per call.
+  static long s_wd = -1;
+  if (s_wd < 0) { const char* e = getenv("GSU_WATCHDOG"); s_wd = e ? atol(e) : 0; }
+  if (s_wd > 0) {
+    long steps = 0;
+    while (gsu_is_running(g) && cycles < maxCycles) {
+      cycles += gsu_step(g);
+      steps++;
+      if ((steps % s_wd) == 0)
+        fprintf(stderr, "[gsu-mon] steps=%ld cyc=%d pc=%02x:%04x sfr=%04x r12=%04x scbr=%02x\n",
+                steps, cycles, g->pbr, g->r[15], g->sfr, g->r[12], g->scbr);
+    }
+    fprintf(stderr, "[gsu-mon] RETURNED naturally: steps=%ld cyc=%d GO=%d\n",
+            steps, cycles, gsu_is_running(g));
+    return;
+  }
   while (gsu_is_running(g) && cycles < maxCycles) {
     cycles += gsu_step(g);
   }
+}
+
+// Force the GSU to halt as if it had executed STOP. Used as a safety valve when
+// a synchronous run exceeds its cycle budget (a non-terminating render would
+// otherwise wedge the CPU's SFR busy-wait). Mirrors the 0x00 STOP opcode.
+void gsu_force_stop(Gsu* g) {
+  g->sfr &= ~GSU_SFR_GO;
+  if (!(g->cfgr & 0x80)) g->sfr |= GSU_SFR_IRQ;
+  clear_prefixes(g);
 }

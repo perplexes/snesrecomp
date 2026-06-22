@@ -394,6 +394,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 end: Optional[int] = None
                 tail_call_pc16: Optional[int] = None
                 exit_mx: Optional[Tuple[int, int]] = None
+                entry_mx: Optional[Tuple[int, int]] = None
                 entry_s_offset_val: int = 0
                 for t in tokens[3:]:
                     if t.startswith('end:'):
@@ -435,6 +436,19 @@ def load_bank_cfg(path: str) -> BankCfg:
                                            int(parts[1]) & 1)
                         except (ValueError, IndexError):
                             pass
+                    elif t.startswith('entry_mx:'):
+                        # Per-function ENTRY mode-state override. Format
+                        # entry_mx:M,X (each 0/1). Seeds the emitted variant's
+                        # (m,x). Needed for functions reached ONLY via runtime
+                        # indirect dispatch (e.g. strats via do_strat_l's tjmp
+                        # RTL-trick) whose entry mode the decoder can't infer
+                        # statically, so the default (1,1)=M1X1 is wrong.
+                        try:
+                            parts = t[len('entry_mx:'):].split(',')
+                            if len(parts) == 2:
+                                entry_mx = (int(parts[0]) & 1, int(parts[1]) & 1)
+                        except (ValueError, IndexError):
+                            pass
                     elif t.startswith('entry_s_offset:'):
                         try:
                             entry_s_offset_val = int(t[len('entry_s_offset:'):])
@@ -447,6 +461,17 @@ def load_bank_cfg(path: str) -> BankCfg:
                 # Non-default attribute on BankEntry; assign post-init.
                 if exit_mx is not None:
                     be.exit_mx = exit_mx
+                # Entry-mode seed. Explicit entry_mx: wins. Otherwise, strat
+                # functions (*_STRAT / *_ISTRAT) are reached via do_strat_l's
+                # runtime tjmp dispatch, which ALWAYS enters with m=1,x=0
+                # (do_strat_l does `a8` and leaves X 16-bit) — so seed M1X0
+                # rather than the (1,1) default. Without this the dispatch
+                # table's M1X0 slot is NULL and the strat is silently skipped
+                # (root cause of playpt==0 / black title, 2026-06-22).
+                if entry_mx is not None:
+                    be.entry_m, be.entry_x = entry_mx
+                elif name and (name.endswith('_STRAT') or name.endswith('_ISTRAT')):
+                    be.entry_m, be.entry_x = 1, 0
                 cfg.entries.append(be)
                 continue
 

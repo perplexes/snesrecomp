@@ -53,6 +53,10 @@ void    gsu_write(Gsu* gsu, uint16_t reg, uint8_t val);
 // consumed (whichever first). Pass a large value to run to completion.
 void    gsu_run(Gsu* gsu, int maxCycles);
 
+// Force the GSU to halt (as if STOP executed). Safety valve for a render that
+// exceeds its cycle budget without terminating.
+void    gsu_force_stop(Gsu* gsu);
+
 // True while the GO bit is set.
 bool    gsu_is_running(Gsu* gsu);
 

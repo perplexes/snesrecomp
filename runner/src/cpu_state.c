@@ -237,6 +237,10 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
         static int n = 0;
         if (n++ < 60) fprintf(stderr, "[cont0wr] addr=%04x DB=%02x val=%02x\n", addr, bank, v);
     }
+    if ((addr == 0x12c3 || addr == 0x12c4) && getenv("SF_DBG_PLAYPT")) {
+        static int n = 0;
+        if (n++ < 80) fprintf(stderr, "[playpt8] addr=%04x DB=%02x val=%02x\n", addr, bank, v);
+    }
     int off = cpu_ram_offset(bank, addr);
     if (off >= 0) {
         uint8 old = cpu->ram[off];
@@ -262,6 +266,10 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
 }
 
 void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
+    if (addr == 0x12c3 && getenv("SF_DBG_PLAYPT")) {
+        static int n = 0;
+        if (n++ < 80) fprintf(stderr, "[playpt16] addr=%04x DB=%02x val=%04x\n", addr, bank, v);
+    }
     int off = cpu_ram_offset(bank, addr);
     if (off >= 0 && off + 1 < 0x20000) {
         uint16 old = (uint16)cpu->ram[off]
@@ -387,6 +395,22 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
         }
     }
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
+    /* SF_TRACE_DISP: log dispatches to the player-istrat region ($0BB5xx) and
+     * any dispatch MISS, to catch silently-skipped strats (e.g. player_Istrat
+     * $0BB53C not registered for the dispatched mx mode → playpt never set). */
+    {
+        static int s_td = -1;
+        if (s_td < 0) s_td = getenv("SF_TRACE_DISP") ? 1 : 0;
+        if (s_td) {
+            int near_player = (pc24 >= 0x0BB500u && pc24 <= 0x0BB600u);
+            if (near_player || fp == NULL) {
+                static int n = 0;
+                if (n++ < 120)
+                    fprintf(stderr, "[disp] pc=$%06X mx=%u found=%d mirror=%d from=$%06X\n",
+                            pc24, mx_idx, fp != NULL, via_mirror, source_pc24);
+            }
+        }
+    }
     if (fp == NULL) {
         /* Not found: the popped (PB:PC) is a normal mid-caller return addr,
          * not a known function entry. Unwind by restoring cpu->S to the value

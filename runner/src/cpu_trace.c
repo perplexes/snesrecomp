@@ -1261,6 +1261,30 @@ static uint32_t fnv1a(const char *s) {
 
 void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) {
     if (g_freeze_capture) return;  /* deliberate inspection-freeze */
+    /* SF_TRACE_STRAT: log entries to the player-setup / strat-dispatch path so
+     * we can see WHERE the chain that should set playpt breaks. Cheap: getenv
+     * cached once; only a handful of addresses match. */
+    {
+        static int s_strat_trace = -1;
+        if (s_strat_trace < 0) s_strat_trace = getenv("SF_TRACE_STRAT") ? 1 : 0;
+        if (s_strat_trace) {
+            switch (pc24) {
+              case 0x02DEB0: case 0x02F018: case 0x0AF922: case 0x03E183:
+              case 0x03E18D: case 0x218000: case 0x1FD283: case 0x2181CC:
+              case 0x0BB53C: case 0x0BD1FF:
+              /* known-running sentinels to validate the trace fires at all */
+              case 0x1FF99F: /*TITLESEQ_L*/ case 0x02D53B: /*transfer_l*/
+              case 0x1FBDB1: /*STARTBOOT*/ case 0x1FFA5E: /*intro_l*/ {
+                static int n = 0;
+                if (n++ < 400)
+                    fprintf(stderr, "[strat] ENTER %-22s pc=$%06X  A=%04X X=%04X Y=%04X DB=%02X\n",
+                            name ? name : "?", pc24, cpu->A, cpu->X, cpu->Y, cpu->DB);
+                break;
+              }
+              default: break;
+            }
+        }
+    }
     /* Soundness check (one-shot, gated by armed flag). Compares the
      * decoder's static (M, X) claim — encoded in the function name's
      * trailing `_M{m}X{x}` suffix — against the runtime cpu->m_flag /

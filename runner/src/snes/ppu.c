@@ -1081,6 +1081,15 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
 //    printf("ppu_write(%d, %d)\n", adr, val);
   switch(adr) {
     case INIDISP & 0xff:
+      // Diagnostic: SF_FORCE_BRIGHT forces every INIDISP write to full
+      // brightness / non-blank, so a frame the game is holding force-blank
+      // still composites its VRAM content. Lets a headless run confirm whether
+      // real graphics are sitting behind a stuck forced-blank.
+      {
+        static int s_fb = -1;
+        if (s_fb < 0) s_fb = getenv("SF_FORCE_BRIGHT") ? 1 : 0;
+        if (s_fb) val = 0x0f;
+      }
       ppu->inidisp = val;
       break;
     case OBSEL & 0xff:

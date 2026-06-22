@@ -239,8 +239,23 @@ void WriteReg(uint16 reg, uint8 value) {
     // SFR GO bit falls through on the next read.
     if (g_snes->hasGsu) {
       gsu_write(g_snes->gsu, reg, value);
-      if (reg == 0x301f && gsu_is_running(g_snes->gsu))
-        gsu_run(g_snes->gsu, 0x7fffffff);
+      if (reg == 0x301f && gsu_is_running(g_snes->gsu)) {
+        // Run the GSU to completion, but bound it: a correct Star Fox render
+        // finishes in well under this budget (max observed ~0.4M cycles). A
+        // non-terminating render (e.g. a runaway polygon span-fill from a bad
+        // count) would otherwise spin here forever and wedge boot, because the
+        // CPU busy-waits on the SFR GO bit. If we hit the cap the GSU is stuck,
+        // so force a STOP so the CPU falls through and boot proceeds.
+        static long s_cap = -1;
+        if (s_cap < 0) { const char* e = getenv("GSU_MAXCYC"); s_cap = e ? atol(e) : 2000000; }
+        gsu_run(g_snes->gsu, (int)s_cap);
+        if (gsu_is_running(g_snes->gsu)) {
+          static long s_warned = 0;
+          if (s_warned < 8) { s_warned++;
+            fprintf(stderr, "[gsu] run exceeded %ld cyc without STOP — forcing halt to unblock CPU\n", s_cap); }
+          gsu_force_stop(g_snes->gsu);
+        }
+      }
     }
     debug_server_on_reg_write(reg, value);
     return;

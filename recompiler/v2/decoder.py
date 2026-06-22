@@ -843,7 +843,25 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
     if mnem == 'JMP':
         if insn.mode == ABS:
             return [(DecodeKey(addr24(bank, insn.operand), post_m, post_x, post_p_stack), 'jump')]
-        # INDIR / INDIR_X (table-dispatch) and LONG (cross-bank) — no
+        if insn.mode == LONG:
+            # JML ($5C). A SAME-bank JML is an intra-routine long branch,
+            # not a cross-routine transfer: Star Fox's strat relay-branch
+            # macros (rlbcs/rlbeq/rlbpl/… in STRATMAC.INC) expand every
+            # conditional branch to `b!cc *+6 : jml target`, where `target`
+            # is a local label in the SAME bank. Import it as a 'jump'
+            # successor exactly like BRA/BRL/JMP-ABS so the target block is
+            # decoded and resolves as a local C label. PB is unchanged for a
+            # same-bank JML, so post_state's bank stays correct. Only a
+            # CROSS-bank JML is a tail-call/cross-routine transfer with no
+            # static successor at this layer (handled by the cross-bank goto
+            # machinery in emit_function). Without this, ~3500 same-bank
+            # strat JMLs emitted `cpu_trace_unresolved_goto_trap(... no named
+            # function at target)` stubs (entire strat system unbuildable).
+            tgt = insn.operand & 0xFFFFFF
+            if ((tgt >> 16) & 0xFF) == bank:
+                return [(DecodeKey(tgt, post_m, post_x, post_p_stack), 'jump')]
+            return []
+        # INDIR / INDIR_X (table-dispatch) and cross-bank LONG — no
         # static successors at this layer.
         return []
 

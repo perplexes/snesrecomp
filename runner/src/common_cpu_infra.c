@@ -149,6 +149,39 @@ void RecompStackPush(const char *name) {
     g_recomp_stack[g_recomp_stack_top++] = name;
   g_last_recomp_func = name;
   debug_server_profile_push(name);
+  /* SF_TRACE_STRAT: log entries to the player-setup / strat-dispatch path
+   * (always-on; this push fires for every recompiled func). Matches both
+   * symbol-named and address-named (bank_BB_AAAA) forms. */
+  {
+    static int s_st = -1;
+    if (s_st < 0) { const char *e = getenv("SF_TRACE_STRAT"); s_st = e ? atoi(e) : 0; }
+    if (s_st >= 2 && name) {
+      /* once initgame_strats_l is entered, log the next 60 entries verbatim so
+       * we see exactly what the player object's strat dispatch resolves to */
+      static int armed = 0, na = 0;
+      if (!armed && (strstr(name, "bank_21_8000") || strstr(name, "INITGAME_STRATS"))) armed = 1;
+      if (armed && na++ < 60) fprintf(stderr, "[all] %s\n", name);
+    }
+    if (s_st && name) {
+      static const char *const pats[] = {
+        "INITGAME_L", "bank_02_DEB0",            /* initgame_l */
+        "INITGAME_STRATS", "bank_21_8000",       /* initgame_strats_l */
+        "INIT_STRATS_L", "bank_21_81CC",         /* init_strats_l */
+        "DO_STRAT_L", "bank_1F_D283",            /* do_strat_l */
+        "PLAYER_ISTRAT", "bank_0B_B53C",         /* player_Istrat */
+        "bank_0B_D1FF", "PLAYERMOVE_INIT",       /* playermove_init */
+        "NEWOBJS", "bank_03_E183", "NEWOBJEX", "bank_03_E18D",
+        "KILL_LIST", "bank_02_F018", "INITMEM", "bank_0A_F922",
+        "ISTRAT", "bank_0B_B53C", NULL };
+      for (int i = 0; pats[i]; i++) {
+        if (strstr(name, pats[i])) {
+          static int n = 0;
+          if (n++ < 500) fprintf(stderr, "[strat] %s\n", name);
+          break;
+        }
+      }
+    }
+  }
   // Boundary auditor (always-on; no-op when SNESRECOMP_TRACE=0).
   // Recorded AFTER the stack push so stack_depth reflects post-push state.
   boundary_audit_record_entry(name);
