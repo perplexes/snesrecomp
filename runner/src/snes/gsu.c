@@ -1053,8 +1053,10 @@ void gsu_run(Gsu* g, int maxCycles) {
       cycles += gsu_step(g);
       steps++;
       if ((steps % s_wd) == 0)
-        fprintf(stderr, "[gsu-mon] steps=%ld cyc=%d pc=%02x:%04x sfr=%04x r12=%04x scbr=%02x\n",
-                steps, cycles, g->pbr, g->r[15], g->sfr, g->r[12], g->scbr);
+        // rdy1=R11 rdy2=R3 rx1=R9 rx2=R10 rx1inc=R7 rx2inc=R8 (MDRAWP.MC mhlines regmap)
+        fprintf(stderr, "[gsu-mon] steps=%ld cyc=%d pc=%02x:%04x sfr=%04x r12=%04x | rdy1=%04x rdy2=%04x rx1=%04x rx2=%04x rx1inc=%04x rx2inc=%04x ry=%04x scbr=%02x\n",
+                steps, cycles, g->pbr, g->r[15], g->sfr, g->r[12],
+                g->r[11], g->r[3], g->r[9], g->r[10], g->r[7], g->r[8], g->r[2], g->scbr);
     }
     fprintf(stderr, "[gsu-mon] RETURNED naturally: steps=%ld cyc=%d GO=%d\n",
             steps, cycles, gsu_is_running(g));
