@@ -68,6 +68,17 @@ struct Gsu {
   uint8_t  pipe;  // prefetched opcode (pipeline)
   bool     pipe_valid;
 
+  // Branch delay slot. The GSU is pipelined: it prefetches the byte at R15
+  // while executing the current instruction, so a taken branch/JMP/LOOP runs
+  // the instruction immediately FOLLOWING it (the delay slot) before control
+  // reaches the target. We model this by deferring the redirect: the branch
+  // sets branch_pending + branch_target instead of writing R15; the gsu_step
+  // wrapper lets the next instruction (the delay slot) execute, then applies
+  // the target. branch_pbr (>=0) also defers a PBR change for LJMP.
+  bool     branch_pending;
+  uint16_t branch_target;
+  int      branch_pbr;
+
   // High-byte latch for IWT/IBT immediate-word loads handled inline.
 
   // Memory.
@@ -259,6 +270,7 @@ void gsu_reset(Gsu* g) {
   memset(g, 0, sizeof(*g));
   g->rom = rom; g->romSize = rs; g->ram = ram; g->ramSize = ms;
   g->vcr = 0x04; // arbitrary version code
+  g->branch_pbr = -1; // no deferred PBR change pending
 }
 
 void gsu_set_memory(Gsu* g, uint8_t* rom, uint32_t romSize,
@@ -311,6 +323,19 @@ void gsu_write(Gsu* g, uint16_t reg, uint8_t val) {
       g->sfr |= GSU_SFR_GO;
       g->pipe_valid = false;
       clear_prefixes(g);
+      // Debug: dump the launch register state (env-gated, first N launches).
+      if (getenv("GSU_LAUNCH_TRACE")) {
+        static int s_n = 0;
+        long lim = atol(getenv("GSU_LAUNCH_TRACE"));
+        if (s_n < lim) {
+          fprintf(stderr, "[gsu launch %d] pbr=%02x r15=%04x rombr=%02x scbr=%02x scmr=%02x\n",
+                  s_n, g->pbr, g->r[15], g->rombr, g->scbr, g->scmr);
+          for (int i = 0; i < 16; i += 4)
+            fprintf(stderr, "   R%-2d=%04x R%-2d=%04x R%-2d=%04x R%-2d=%04x\n",
+                    i, g->r[i], i+1, g->r[i+1], i+2, g->r[i+2], i+3, g->r[i+3]);
+          s_n++;
+        }
+      }
     }
     return;
   }
@@ -330,8 +355,13 @@ void gsu_write(Gsu* g, uint16_t reg, uint8_t val) {
 // ---- Branch helper ------------------------------------------------------
 
 static void do_branch(Gsu* g, int take) {
-  int8_t disp = (int8_t)fetch(g); // signed displacement byte
-  if (take) g->r[15] = (uint16_t)(g->r[15] + disp);
+  int8_t disp = (int8_t)fetch(g); // signed displacement byte; R15 now at delay slot
+  if (take) {
+    // Defer the redirect: the delay-slot instruction (at the current R15)
+    // executes first, then gsu_step applies branch_target.
+    g->branch_target = (uint16_t)(g->r[15] + disp);
+    g->branch_pending = true;
+  }
 }
 
 // ---- The instruction step ----------------------------------------------
@@ -474,12 +504,16 @@ static int gsu_step_inner(Gsu* g) {
       return 1;
     }
 
-    // 0x3C LOOP: dec R12, branch to R13 if R12 != 0.
+    // 0x3C LOOP: dec R12, branch to R13 if R12 != 0. Has a delay slot like the
+    // other control-flow ops, so defer the redirect (see gsu_step).
     case 0x3c: {
       g->r[12]--;
       set_flag(g, GSU_SFR_Z, g->r[12] == 0);
       set_flag(g, GSU_SFR_S, g->r[12] & 0x8000);
-      if (!get_flag(g, GSU_SFR_Z)) g->r[15] = g->r[13];
+      if (!get_flag(g, GSU_SFR_Z)) {
+        g->branch_target = g->r[13];
+        g->branch_pending = true;
+      }
       clear_prefixes(g);
       return 1;
     }
@@ -691,17 +725,17 @@ static int gsu_step_inner(Gsu* g) {
       return 1;
     }
 
-    // 0x98-0x9D JMP Rn / LJMP (ALT1=LJMP sets PBR too)
+    // 0x98-0x9D JMP Rn / LJMP (ALT1=LJMP sets PBR too). Both have a delay slot
+    // (the instruction following the JMP executes before control reaches Rn),
+    // so defer the redirect via branch_pending (see gsu_step).
     case 0x98: case 0x99: case 0x9a: case 0x9b:
     case 0x9c: case 0x9d: {
       int rn = op & 0x0f;
-      if (alt1) {
-        // LJMP: PBR = Sreg low byte; PC = Rn; reload cache base.
-        g->pbr = g->r[sreg] & 0xff;
-        g->r[15] = g->r[rn];
-      } else {
-        g->r[15] = g->r[rn];
-      }
+      g->branch_target = g->r[rn];
+      g->branch_pending = true;
+      // LJMP: PBR = Sreg low byte (deferred until the redirect, so the delay
+      // slot still executes from the current program bank).
+      g->branch_pbr = alt1 ? (g->r[sreg] & 0xff) : -1;
       clear_prefixes(g);
       return 1;
     }
@@ -919,8 +953,24 @@ static int gsu_step_inner(Gsu* g) {
 // without an R14 write does NOT reload — the documented hardware quirk).
 static int gsu_step(Gsu* g) {
   uint16_t r14_before = g->r[14];
+  // A branch/JMP/LOOP from the PREVIOUS step deferred its redirect so that the
+  // delay-slot instruction (the one immediately after the branch) runs first.
+  // Capture that pending redirect, run this instruction (the delay slot), then
+  // apply the target — unless the delay slot itself branched (rare; its branch
+  // wins). This mirrors the GSU's prefetch pipeline (snes9x FX_STEP).
+  bool had_pending = g->branch_pending;
+  uint16_t target = g->branch_target;
+  int target_pbr = g->branch_pbr;
+  g->branch_pending = false;
+  g->branch_pbr = -1;
+
   int cycles = gsu_step_inner(g);
   if (g->r[14] != r14_before) gsu_latch_romdr(g);
+
+  if (had_pending && !g->branch_pending) {
+    g->r[15] = target;
+    if (target_pbr >= 0) g->pbr = (uint8_t)target_pbr;
+  }
   return cycles;
 }
 

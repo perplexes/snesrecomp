@@ -205,30 +205,31 @@ static void test_to_from_with_mechanics(void) {
 }
 
 static void test_branch(void) {
-  // Test BNE taken and not-taken.
-  // IWT R1,#1 ; IWT R2,#1 ; FROM R1 ; TO R3 ; SUB R2 (R3=0, Z set) ;
-  // BEQ +2 (skip the next IWT) ; IWT R4,#$BAD ; IWT R5,#$600D ; STOP
-  // BEQ disp is measured from the byte AFTER the displacement.
-  // Layout offsets:
-  //  0: F1 01 00
-  //  3: F2 01 00
-  //  6: B1
-  //  7: 13
-  //  8: 62          (SUB R2 -> R3=0, Z=1)
-  //  9: 09 dd       (BEQ, disp)  next byte after disp is offset 11
-  // 11: F4 AD 0B    (IWT R4,#$0BAD)  <- skipped if branch taken
-  // 14: F5 0D 60    (IWT R5,#$600D)
-  // 17: 00          STOP
-  // To skip the 3-byte IWT R4, disp = 3 (11 + 3 = 14).
+  // BEQ taken, skipping an instruction — WITH the GSU branch delay slot. The
+  // instruction immediately after the branch (the delay slot) ALWAYS executes,
+  // so to skip code a NOP sits in the delay slot and the skipped instruction
+  // follows it. The branch displacement is measured from the byte after the
+  // displacement (= the delay slot).
+  //  0: F1 01 00   IWT R1,#1
+  //  3: F2 01 00   IWT R2,#1
+  //  6: B1         FROM R1        (sreg=R1)
+  //  7: 13         TO R3          (dreg=R3)
+  //  8: 62         SUB R2         (R3 = R1-R2 = 0, Z=1)
+  //  9: 09 04      BEQ +4   (disp at 10; delay slot at 11; target = 11 + 4 = 15)
+  // 11: 01         NOP            <- delay slot (always runs; harmless)
+  // 12: F4 AD 0B   IWT R4,#$0BAD  <- skipped when taken
+  // 15: F5 0D 60   IWT R5,#$600D  <- branch target
+  // 18: 00         STOP
   uint8_t prog[] = {
     0xF1, 0x01, 0x00,
     0xF2, 0x01, 0x00,
     0xB1,
     0x13,
     0x62,
-    0x09, 0x03,         // BEQ +3
-    0xF4, 0xAD, 0x0B,   // IWT R4,#$0BAD (should be skipped)
-    0xF5, 0x0D, 0x60,   // IWT R5,#$600D
+    0x09, 0x04,         // BEQ +4 (target = delay-slot addr 11 + 4 = 15)
+    0x01,               // NOP (delay slot)
+    0xF4, 0xAD, 0x0B,   // IWT R4,#$0BAD (skipped when taken)
+    0xF5, 0x0D, 0x60,   // IWT R5,#$600D (target)
     0x00,
   };
   Gsu* g = make_gsu_with_program(prog, sizeof(prog));
@@ -238,6 +239,33 @@ static void test_branch(void) {
   CHECK(gsu_get_reg(g, 5) == 0x600D);  // executed
   gsu_free(g);
   printf("  test_branch OK\n");
+}
+
+// The GSU is pipelined: the instruction immediately following a branch (the
+// delay slot) executes before control reaches the target, even when the branch
+// is taken. Regression test — without delay-slot modeling, Star Fox's GSU 3D
+// loops use the wrong register-prefix context and never converge.
+static void test_branch_delay_slot(void) {
+  // Layout (BRA = opcode + 1 displacement byte; delay slot is the byte after):
+  //  0: 05 03   BRA +3   (disp at 1; delay slot at 2; target = 2 + 3 = 5)
+  //  2: D1      INC R1    <- delay slot: ALWAYS runs (R1 0->1)
+  //  3: F2 AD   IWT R2,.. <- jumped over (never executed; bytes are dead)
+  //  5: D3      INC R3    <- branch target (R3 0->1)
+  //  6: 00      STOP
+  uint8_t prog[] = {
+    0x05, 0x03,         // 0: BRA +3
+    0xD1,               // 2: INC R1 (delay slot)
+    0xF2, 0xAD,         // 3: IWT R2 opcode + imm (skipped)
+    0xD3,               // 5: INC R3 (branch target)
+    0x00,               // 6: STOP
+  };
+  Gsu* g = make_gsu_with_program(prog, sizeof(prog));
+  launch_and_run(g);
+  CHECK(gsu_get_reg(g, 1) == 1);   // delay slot executed
+  CHECK(gsu_get_reg(g, 2) == 0);   // skipped by the branch
+  CHECK(gsu_get_reg(g, 3) == 1);   // branch target executed
+  gsu_free(g);
+  printf("  test_branch_delay_slot OK\n");
 }
 
 static void test_nop(void) {
@@ -336,6 +364,7 @@ int main(void) {
   test_nop();
   test_plot();
   test_getb_rom_data();
+  test_branch_delay_slot();
   printf("ALL %d CHECKS PASSED\n", g_tests);
   return 0;
 }
