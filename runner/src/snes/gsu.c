@@ -473,28 +473,41 @@ static int gsu_step_inner(Gsu* g) {
       return 1;
     }
 
+    // 0x05-0x0F: branches. Branch opcodes do NOT clear the register-select /
+    // ALT / B prefixes: on the GSU the prefix set immediately before a branch
+    // carries across the branch into its (always-executed) delay-slot
+    // instruction, which then clears it. Star Fox's polygon renderer relies on
+    // this exact idiom to zero an edge height:
+    //     with rdy2        ; prefix: Sreg=Dreg=R3
+    //     bra  mnewx1init
+    //     sub  rdy2        ; delay slot: R3 = R3 - R3 = 0  (uses the prefix)
+    // If the branch cleared the prefix, the delay-slot `sub` would target R0
+    // instead and leave rdy2 holding stale scratch (a leftover high byte from
+    // the decompressor), producing a degenerate ~991-scanline polygon. For a
+    // branch NOT preceded by a prefix the latches are already clear, so this is
+    // a no-op there. (Branches still defer the PC redirect via do_branch.)
     // 0x05 BRA (always)
-    case 0x05: do_branch(g, 1); clear_prefixes(g); return 1;
+    case 0x05: do_branch(g, 1); return 1;
     // 0x06 BGE  (S == OV)
-    case 0x06: do_branch(g, get_flag(g,GSU_SFR_S)==get_flag(g,GSU_SFR_OV)); clear_prefixes(g); return 1;
+    case 0x06: do_branch(g, get_flag(g,GSU_SFR_S)==get_flag(g,GSU_SFR_OV)); return 1;
     // 0x07 BLT  (S != OV)
-    case 0x07: do_branch(g, get_flag(g,GSU_SFR_S)!=get_flag(g,GSU_SFR_OV)); clear_prefixes(g); return 1;
+    case 0x07: do_branch(g, get_flag(g,GSU_SFR_S)!=get_flag(g,GSU_SFR_OV)); return 1;
     // 0x08 BNE  (Z == 0)
-    case 0x08: do_branch(g, !get_flag(g,GSU_SFR_Z)); clear_prefixes(g); return 1;
+    case 0x08: do_branch(g, !get_flag(g,GSU_SFR_Z)); return 1;
     // 0x09 BEQ  (Z == 1)
-    case 0x09: do_branch(g, get_flag(g,GSU_SFR_Z)); clear_prefixes(g); return 1;
+    case 0x09: do_branch(g, get_flag(g,GSU_SFR_Z)); return 1;
     // 0x0A BPL  (S == 0)
-    case 0x0a: do_branch(g, !get_flag(g,GSU_SFR_S)); clear_prefixes(g); return 1;
+    case 0x0a: do_branch(g, !get_flag(g,GSU_SFR_S)); return 1;
     // 0x0B BMI  (S == 1)
-    case 0x0b: do_branch(g, get_flag(g,GSU_SFR_S)); clear_prefixes(g); return 1;
+    case 0x0b: do_branch(g, get_flag(g,GSU_SFR_S)); return 1;
     // 0x0C BCC  (CY == 0)
-    case 0x0c: do_branch(g, !get_flag(g,GSU_SFR_CY)); clear_prefixes(g); return 1;
+    case 0x0c: do_branch(g, !get_flag(g,GSU_SFR_CY)); return 1;
     // 0x0D BCS  (CY == 1)
-    case 0x0d: do_branch(g, get_flag(g,GSU_SFR_CY)); clear_prefixes(g); return 1;
+    case 0x0d: do_branch(g, get_flag(g,GSU_SFR_CY)); return 1;
     // 0x0E BVC  (OV == 0)
-    case 0x0e: do_branch(g, !get_flag(g,GSU_SFR_OV)); clear_prefixes(g); return 1;
+    case 0x0e: do_branch(g, !get_flag(g,GSU_SFR_OV)); return 1;
     // 0x0F BVS  (OV == 1)
-    case 0x0f: do_branch(g, get_flag(g,GSU_SFR_OV)); clear_prefixes(g); return 1;
+    case 0x0f: do_branch(g, get_flag(g,GSU_SFR_OV)); return 1;
 
     // 0x10-0x1F: TO/MOVE (set Dreg) or WITH (B flag set) -> set Sreg & Dreg.
     // Under ALT1, MOVES; here both behave as register-prefix selects.
@@ -1053,10 +1066,10 @@ void gsu_run(Gsu* g, int maxCycles) {
       cycles += gsu_step(g);
       steps++;
       if ((steps % s_wd) == 0)
-        // rdy1=R11 rdy2=R3 rx1=R9 rx2=R10 rx1inc=R7 rx2inc=R8 (MDRAWP.MC mhlines regmap)
-        fprintf(stderr, "[gsu-mon] steps=%ld cyc=%d pc=%02x:%04x sfr=%04x r12=%04x | rdy1=%04x rdy2=%04x rx1=%04x rx2=%04x rx1inc=%04x rx2inc=%04x ry=%04x scbr=%02x\n",
-                steps, cycles, g->pbr, g->r[15], g->sfr, g->r[12],
-                g->r[11], g->r[3], g->r[9], g->r[10], g->r[7], g->r[8], g->r[2], g->scbr);
+        fprintf(stderr, "[gsu-mon] s=%ld pc=%02x:%04x sfr=%04x R0..15=%04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x r13t=%04x\n",
+                steps, g->pbr, g->r[15], g->sfr,
+                g->r[0],g->r[1],g->r[2],g->r[3],g->r[4],g->r[5],g->r[6],g->r[7],
+                g->r[8],g->r[9],g->r[10],g->r[11],g->r[12],g->r[13],g->r[14],g->r[15], g->r[13]);
     }
     fprintf(stderr, "[gsu-mon] RETURNED naturally: steps=%ld cyc=%d GO=%d\n",
             steps, cycles, gsu_is_running(g));
