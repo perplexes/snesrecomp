@@ -116,7 +116,14 @@ static inline uint8_t rom_read(Gsu* g, uint8_t bank, uint16_t addr) {
 static inline uint8_t ram_read(Gsu* g, uint8_t bank, uint16_t addr) {
   if (!g->ram || g->ramSize == 0) return 0;
   uint32_t off = ((uint32_t)bank << 16) | addr;
-  return g->ram[off & (g->ramSize - 1)];
+  uint8_t v = g->ram[off & (g->ramSize - 1)];
+  if (getenv("GSU_RAMRD")) {
+    static int s_n = 0; long lim = atol(getenv("GSU_RAMRD"));
+    if (s_n < lim) { s_n++;
+      fprintf(stderr, "[ramrd] rambr=%02x addr=%04x off=%05x val=%02x pc=%02x:%04x\n",
+              bank, addr, off & (g->ramSize - 1), v, g->pbr, g->r[15]); }
+  }
+  return v;
 }
 static inline void ram_write(Gsu* g, uint8_t bank, uint16_t addr, uint8_t v) {
   if (!g->ram || g->ramSize == 0) return;
@@ -157,14 +164,29 @@ static inline void gsu_latch_romdr(Gsu* g) {
   g->romdr = (uint16_t)(lo | (hi << 8));
 }
 
+// Defer a write to R15 (the program counter) by one instruction. The GSU is
+// pipelined: writing R15 does NOT take effect immediately — the instruction
+// already prefetched at the OLD R15 (the "delay slot") executes first, then
+// control reaches the new target. This applies to EVERY R15 write (ALU/TO/MOVE/
+// IWT/IBT/LM/LMS targeting R15), not just the explicit branch opcodes. We model
+// it with the same branch_pending machinery the branch/JMP/LOOP ops use: the
+// gsu_step wrapper runs the next instruction, then applies branch_target.
+// (Missing this made `mcall` (= LINK + IWT R15) skip its delay slot `with rd2`,
+// so MDECRUNCH's `sub rd2` never cleared rd2 across iterations → runaway count.)
+static inline void set_r15_deferred(Gsu* g, uint16_t val) {
+  g->branch_target = val;
+  g->branch_pending = true;
+}
+
 // Write a value to the destination register; if Dreg==R15 this is a branch
-// (alters PC). Then apply the standard post-instruction prefix reset. A write
-// to R14 triggers the ROM data prefetch, but that is handled uniformly by the
-// gsu_step wrapper (any R14 change re-latches ROMDR), so we don't special-case
-// it here — that also covers INC/DEC/IWT/IBT/LM writes that bypass write_dreg.
+// (alters PC) and is deferred one instruction (delay slot). Then apply the
+// standard post-instruction prefix reset. A write to R14 triggers the ROM data
+// prefetch, but that is handled uniformly by the gsu_step wrapper (any R14
+// change re-latches ROMDR), so we don't special-case it here — that also covers
+// INC/DEC/IWT/IBT/LM writes that bypass write_dreg.
 static inline void write_dreg(Gsu* g, uint16_t val) {
-  g->r[g->dreg] = val;
-  // R15 write here just sets PC; GO stays as-is (already running).
+  if (g->dreg == 15) set_r15_deferred(g, val);
+  else g->r[g->dreg] = val;
 }
 
 // ---- Flag computation for ALU ops --------------------------------------
@@ -323,6 +345,14 @@ void gsu_write(Gsu* g, uint16_t reg, uint8_t val) {
       g->sfr |= GSU_SFR_GO;
       g->pipe_valid = false;
       clear_prefixes(g);
+      if (getenv("GSU_RAMDUMP") && g->ram) {
+        fprintf(stderr, "[ramdump] launch pbr=%02x r15=%04x — cart->ram[0:0x80]:\n", g->pbr, g->r[15]);
+        for (int row = 0; row < 0x80; row += 16) {
+          fprintf(stderr, "  %05x:", row);
+          for (int c = 0; c < 16; c++) fprintf(stderr, " %02x", g->ram[row + c]);
+          fprintf(stderr, "\n");
+        }
+      }
       // Debug: dump the launch register state (env-gated, first N launches).
       if (getenv("GSU_LAUNCH_TRACE")) {
         static int s_n = 0;
@@ -374,9 +404,9 @@ static int gsu_step_inner(Gsu* g) {
   extern long g_gsu_trace_budget;
   if (g_gsu_trace_budget > 0) {
     g_gsu_trace_budget--;
-    fprintf(stderr, "GSU %02x:%04x op=%02x sfr=%04x r6=%04x r9=%04x r13=%04x r14=%04x\n",
+    fprintf(stderr, "GSU %02x:%04x op=%02x sfr=%04x r1=%04x r2=%04x r3=%04x r4=%04x r9=%04x r11=%04x r12=%04x r14=%04x romdr=%04x\n",
             g->pbr, g->r[15], rom_read(g, g->pbr, g->r[15]), g->sfr,
-            g->r[6], g->r[9], g->r[13], g->r[14]);
+            g->r[1], g->r[2], g->r[3], g->r[4], g->r[9], g->r[11], g->r[12], g->r[14], g->romdr);
   }
 #endif
   uint8_t op = fetch(g);
@@ -777,7 +807,8 @@ static int gsu_step_inner(Gsu* g) {
         uint8_t pp = fetch(g);
         uint16_t addr = (uint16_t)pp << 1;
         g->lastRamAdr = addr;
-        g->r[rn] = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
+        uint16_t v = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
+        if (rn == 15) set_r15_deferred(g, v); else g->r[rn] = v;
       } else if (alt2) {
         // SMS (yy),Rn: store Rn word to RAM at (#imm<<1).
         uint8_t pp = fetch(g);
@@ -788,7 +819,8 @@ static int gsu_step_inner(Gsu* g) {
       } else {
         // IBT Rn,#imm : sign-extended byte immediate.
         int8_t imm = (int8_t)fetch(g);
-        g->r[rn] = (uint16_t)(int16_t)imm;
+        if (rn == 15) set_r15_deferred(g, (uint16_t)(int16_t)imm);
+        else g->r[rn] = (uint16_t)(int16_t)imm;
       }
       clear_prefixes(g);
       return 1;
@@ -925,12 +957,16 @@ static int gsu_step_inner(Gsu* g) {
         uint16_t lo = fetch(g);
         uint16_t hi = fetch(g);
         uint16_t addr = lo | (hi << 8);
-        g->r[rn] = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
+        uint16_t v = ram_read(g, g->rambr, addr) | ((uint16_t)ram_read(g, g->rambr, addr+1) << 8);
+        if (rn == 15) set_r15_deferred(g, v); else g->r[rn] = v;
       } else {
         // IWT Rn,#imm16 : load immediate word (little-endian).
         uint16_t lo = fetch(g);
         uint16_t hi = fetch(g);
-        g->r[rn] = lo | (hi << 8);
+        uint16_t v = lo | (hi << 8);
+        // IWT R15 (= `miwt pc,addr`, the jump in mcall/mlbeq) is a deferred
+        // branch: the delay-slot instruction runs before control transfers.
+        if (rn == 15) set_r15_deferred(g, v); else g->r[rn] = v;
       }
       clear_prefixes(g);
       return 1;

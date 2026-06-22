@@ -268,6 +268,36 @@ static void test_branch_delay_slot(void) {
   printf("  test_branch_delay_slot OK\n");
 }
 
+static void test_iwt_r15_delay_slot(void) {
+  // Writing R15 via IWT (= `miwt pc,addr`, the jump emitted by the `mcall` /
+  // `mlbeq` macros) is a DEFERRED branch like JMP/BRA: the instruction in the
+  // delay slot (the byte right after the IWT immediate) must execute before
+  // control transfers. MDECRUNCH's `mcall mgetbits` puts `with rd2` in that
+  // delay slot so the callee's opening `sub rd2` clears rd2; skipping it made
+  // rd2 accumulate garbage and the decompressor never terminated (boot hang).
+  //   0: FF 06 00  IWT R15,#6  (imm at 1-2; delay slot at 3; target = 6)
+  //   3: D1        INC R1      <- delay slot: ALWAYS runs (R1 0->1)
+  //   4: D2        INC R2      <- jumped over (dead)
+  //   5: 01        NOP         <- jumped over (dead)
+  //   6: D3        INC R3      <- branch target (R3 0->1)
+  //   7: 00        STOP
+  uint8_t prog[] = {
+    0xFF, 0x06, 0x00,   // 0: IWT R15,#6
+    0xD1,               // 3: INC R1 (delay slot)
+    0xD2,               // 4: INC R2 (skipped)
+    0x01,               // 5: NOP    (skipped)
+    0xD3,               // 6: INC R3 (target)
+    0x00,               // 7: STOP
+  };
+  Gsu* g = make_gsu_with_program(prog, sizeof(prog));
+  launch_and_run(g);
+  CHECK(gsu_get_reg(g, 1) == 1);   // delay slot executed
+  CHECK(gsu_get_reg(g, 2) == 0);   // skipped by the jump
+  CHECK(gsu_get_reg(g, 3) == 1);   // jump target executed
+  gsu_free(g);
+  printf("  test_iwt_r15_delay_slot OK\n");
+}
+
 static void test_nop(void) {
   uint8_t prog[] = { 0x01, 0x01, 0x01, 0x00 };
   Gsu* g = make_gsu_with_program(prog, sizeof(prog));
@@ -365,6 +395,7 @@ int main(void) {
   test_plot();
   test_getb_rom_data();
   test_branch_delay_slot();
+  test_iwt_r15_delay_slot();
   printf("ALL %d CHECKS PASSED\n", g_tests);
   return 0;
 }
