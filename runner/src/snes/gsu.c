@@ -230,6 +230,16 @@ static inline void set_zs16(Gsu* g, uint16_t res) {
 // For each pixel we write the COLOR register's 8 bits across the 8 planes.
 // Assumptions are documented; this is the standard plot-to-bitmap math.
 
+// Color depth (bits per pixel) from SCMR.md (bits 0-1), per bsnes:
+//   md 0 -> 2bpp (4 color), md 1 -> 4bpp (16 color), md 3 -> 8bpp (256 color).
+// Star Fox's 3D bitmap runs in md 1 (4bpp): SCMR=$39 -> md=1. The char byte
+// size scales with depth (2bpp=16, 4bpp=32, 8bpp=64), and the plot writes one
+// bit into each of `bpp` planes. Using the wrong depth makes every char stride
+// wrong, so adjacent chars overwrite each other and the bitmap is garbage.
+static int gsu_bpp(Gsu* g) {
+  switch (g->scmr & 3) { case 0: return 2; case 1: return 4; default: return 8; }
+}
+
 static uint32_t plot_char_base(Gsu* g, int charX, int charY) {
   // Screen base in 1KB units.
   uint32_t base = (uint32_t)g->scbr << 10;
@@ -244,9 +254,10 @@ static uint32_t plot_char_base(Gsu* g, int charX, int charY) {
     default: charsPerCol = 16; break; // OBJ mode: treated as columns of 16
   }
   // Chars are laid out in column-major strips (each column is `charsPerCol`
-  // chars tall), 8bpp => 32 bytes per char.
+  // chars tall). Char byte size scales with color depth: 2bpp=16, 4bpp=32,
+  // 8bpp=64 (= bpp * 8 bytes).
   uint32_t charNum = (uint32_t)charX * charsPerCol + charY;
-  return base + charNum * 32;
+  return base + charNum * (uint32_t)(gsu_bpp(g) * 8);
 }
 
 // 8bpp char: 8 rows. Each row is represented (bsnes-style) as two pairs of
@@ -259,11 +270,10 @@ static void plot_pixel_8bpp(Gsu* g, int x, int y, uint8_t color) {
   int px = x & 7, py = y & 7;
   uint32_t cbase = plot_char_base(g, charX, charY);
   uint8_t bitmask = 0x80 >> px;
-  // 8 bitplanes: planes 0,1 at offset row*2; planes 2,3 at +16;
-  // planes 4,5 at +32-equivalent... For an 8bpp char the standard layout is
-  // 4 plane-pairs at +0,+16,+? . bsnes uses: plane n byte = cbase +
-  // ((n>>1)*16) + (n&1) + py*2. We follow that for all 8 planes:
-  for (int plane = 0; plane < 8; plane++) {
+  int nplanes = gsu_bpp(g);
+  // Plane n byte = cbase + ((n>>1)*16) + (n&1) + py*2 (bsnes layout). For 4bpp
+  // only planes 0..3 exist (char is 32 bytes); for 8bpp planes 0..7 (64 bytes).
+  for (int plane = 0; plane < nplanes; plane++) {
     uint32_t addr = cbase + ((plane >> 1) * 16) + (plane & 1) + py * 2;
     // addr may exceed 16 bits; fold the high bits into the RAM bank.
     uint8_t bank = g->rambr + (uint8_t)(addr >> 16);
@@ -280,7 +290,8 @@ static uint8_t rpix_pixel_8bpp(Gsu* g, int x, int y) {
   uint32_t cbase = plot_char_base(g, charX, charY);
   uint8_t bitmask = 0x80 >> px;
   uint8_t color = 0;
-  for (int plane = 0; plane < 8; plane++) {
+  int nplanes = gsu_bpp(g);
+  for (int plane = 0; plane < nplanes; plane++) {
     uint32_t addr = cbase + ((plane >> 1) * 16) + (plane & 1) + py * 2;
     uint8_t bank = g->rambr + (uint8_t)(addr >> 16);
     uint16_t a16 = (uint16_t)addr;
@@ -1056,6 +1067,7 @@ static int gsu_step(Gsu* g) {
 
 void gsu_run(Gsu* g, int maxCycles) {
   int cycles = 0;
+  uint16_t entry_r15 = g->r[15];  // launch PC, for GSU_DUMP_RAM targeting
   // Diagnostic watchdog: if a single synchronous run exceeds GSU_WATCHDOG
   // cycles, it almost certainly means the GSU program is looping without
   // reaching STOP. Print a small PC histogram so the loop site is visible,
@@ -1084,17 +1096,19 @@ void gsu_run(Gsu* g, int maxCycles) {
   // GSU_DUMP_RAM=N: after the first run that plots >= N pixels, dump the full
   // Game Pak RAM and log SCBR/RAMBR/SCMR so we can locate the rendered back
   // buffer and compare it to the VRAM transfer source.
+  // GSU_DUMP_RAM: dump Game Pak RAM right after the Nth MDO_3D_DISPLAY ($ac21)
+  // run (the actual 3D scene render), capturing the SCBR that routine used, so
+  // we locate the real rendered bitmap rather than an arbitrary math/dust run.
   { static long s_dr = -2; if (s_dr == -2) { const char* e = getenv("GSU_DUMP_RAM"); s_dr = e ? atol(e) : 0; }
-    if (s_dr > 0) { static unsigned long s_pp = 0; extern unsigned long g_gsu_plot_count;
-      static int s_done = 0;
-      if (!s_done && (g_gsu_plot_count - s_pp) >= (unsigned long)s_dr) {
+    if (s_dr > 0 && entry_r15 == 0xac21) { extern unsigned long g_gsu_plot_count;
+      static long s_seen = 0; static int s_done = 0; s_seen++;
+      if (!s_done && s_seen >= s_dr) {
         s_done = 1;
         FILE* f = fopen("/tmp/sf_gpram.bin", "wb");
         if (f && g->ram) { fwrite(g->ram, 1, g->ramSize, f); fclose(f); }
-        fprintf(stderr, "[gsu-dump] scbr=%02x rambr=%02x scmr=%02x ramSize=%u plots=%lu -> /tmp/sf_gpram.bin\n",
-                g->scbr, g->rambr, g->scmr, g->ramSize, g_gsu_plot_count); fflush(stderr);
+        fprintf(stderr, "[gsu-dump] AFTER mdo_3d_display #%ld: scbr=%02x rambr=%02x scmr=%02x plots=%lu -> /tmp/sf_gpram.bin\n",
+                s_seen, g->scbr, g->rambr, g->scmr, g_gsu_plot_count); fflush(stderr);
       }
-      s_pp = g_gsu_plot_count;
     }
   }
 }
