@@ -287,13 +287,26 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, uint y, bool sub, uint layer, PpuZb
   const uint16 *addr;
   // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
   if (getenv("SF_BG_PROBE") && y == 100) {
-    static int s_dn[4] = {0,0,0,0};
-    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+    static int s_cnt[4] = {0,0,0,0};
+    int probe_at = atoi(getenv("SF_BG_PROBE"));   // fire on the Nth scanline-100 visit (per layer)
+    s_cnt[layer & 3]++;
+    if (s_cnt[layer & 3] == probe_at) {
       const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
       fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
               layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
               ppu->bgXsc[layer], ppu->bgTileAdr);
       for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n");
+      // Also dump the ACTUAL bits/pixel the engine reads per tile on this row.
+      fprintf(stderr, "[bg-probe L%u bits] ta0=%d ta1=%d:", layer, tileadr0, tileadr1);
+      for (int i = 0; i < 16; i++) {
+        uint16 t = row[i];
+        int ta = (t & 0x8000) ? tileadr1 : tileadr0;
+        const uint16 *a = &ppu->vram[(ta + (t & 0x3ff) * 16) & 0x7fff];
+        uint32 bits = a[0] | (a[8] << 16);
+        int px = (bits >> 0) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8;
+        fprintf(stderr, " t%u:bits=%08x px0=%d", t & 0x3ff, bits, px);
+      }
       fprintf(stderr, "\n"); fflush(stderr);
     }
   }
@@ -519,13 +532,26 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu, uint y, bool sub, uint layer
   const uint16 *addr;
   // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
   if (getenv("SF_BG_PROBE") && y == 100) {
-    static int s_dn[4] = {0,0,0,0};
-    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+    static int s_cnt[4] = {0,0,0,0};
+    int probe_at = atoi(getenv("SF_BG_PROBE"));   // fire on the Nth scanline-100 visit (per layer)
+    s_cnt[layer & 3]++;
+    if (s_cnt[layer & 3] == probe_at) {
       const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
       fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
               layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
               ppu->bgXsc[layer], ppu->bgTileAdr);
       for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n");
+      // Also dump the ACTUAL bits/pixel the engine reads per tile on this row.
+      fprintf(stderr, "[bg-probe L%u bits] ta0=%d ta1=%d:", layer, tileadr0, tileadr1);
+      for (int i = 0; i < 16; i++) {
+        uint16 t = row[i];
+        int ta = (t & 0x8000) ? tileadr1 : tileadr0;
+        const uint16 *a = &ppu->vram[(ta + (t & 0x3ff) * 16) & 0x7fff];
+        uint32 bits = a[0] | (a[8] << 16);
+        int px = (bits >> 0) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8;
+        fprintf(stderr, " t%u:bits=%08x px0=%d", t & 0x3ff, bits, px);
+      }
       fprintf(stderr, "\n"); fflush(stderr);
     }
   }
@@ -590,13 +616,26 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, int y, bool sub, uint layer,
   const uint16 *addr;
   // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
   if (getenv("SF_BG_PROBE") && y == 100) {
-    static int s_dn[4] = {0,0,0,0};
-    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+    static int s_cnt[4] = {0,0,0,0};
+    int probe_at = atoi(getenv("SF_BG_PROBE"));   // fire on the Nth scanline-100 visit (per layer)
+    s_cnt[layer & 3]++;
+    if (s_cnt[layer & 3] == probe_at) {
       const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
       fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
               layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
               ppu->bgXsc[layer], ppu->bgTileAdr);
       for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n");
+      // Also dump the ACTUAL bits/pixel the engine reads per tile on this row.
+      fprintf(stderr, "[bg-probe L%u bits] ta0=%d ta1=%d:", layer, tileadr0, tileadr1);
+      for (int i = 0; i < 16; i++) {
+        uint16 t = row[i];
+        int ta = (t & 0x8000) ? tileadr1 : tileadr0;
+        const uint16 *a = &ppu->vram[(ta + (t & 0x3ff) * 16) & 0x7fff];
+        uint32 bits = a[0] | (a[8] << 16);
+        int px = (bits >> 0) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8;
+        fprintf(stderr, " t%u:bits=%08x px0=%d", t & 0x3ff, bits, px);
+      }
       fprintf(stderr, "\n"); fflush(stderr);
     }
   }
