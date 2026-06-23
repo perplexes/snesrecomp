@@ -370,6 +370,31 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
       break;
     }
     case 0x420b: {
+      // SF_DMA_TRACE=N: log the first N DMAs whose B-bus target is VRAM
+      // ($2118/$2119), with source bank:addr, dest reg, and size, to confirm
+      // the per-frame bitmap1->VRAM transfer (irqbit1/irqbit2) lands where BG1
+      // reads it.
+      { static long s_dt = -2, s_dn = 0; if (s_dt == -2) { const char* e = getenv("SF_DMA_TRACE"); s_dt = e ? atol(e) : 0; }
+        if (s_dt > 0 && s_dn < s_dt) {
+          for (int c = 0; c < 8; c++) if (val & (1 << c)) {
+            uint8_t b = snes->dma->channel[c].bAdr;
+            if (b == 0x18 || b == 0x19) { s_dn++;
+              // Sample the DMA source at transfer time: count nonzero and
+              // distinct byte values in the first 0x2000 bytes, so we can tell
+              // whether the source buffer is a uniform clear (few distinct
+              // values, e.g. all $00 or all $ff) or real sparse polygon data.
+              long snz = 0; uint8_t seen[256]; for (int k=0;k<256;k++) seen[k]=0; long distinct=0;
+              uint32_t saddr = (uint32_t)snes->dma->channel[c].aBank << 16 | snes->dma->channel[c].aAdr;
+              uint32_t scan = snes->dma->channel[c].size; if (scan > 0x2000) scan = 0x2000;
+              for (uint32_t k = 0; k < scan; k++) {
+                uint8_t bb = snes_read(snes, saddr + k);
+                if (bb) snz++;
+                if (!seen[bb]) { seen[bb]=1; distinct++; }
+              }
+              fprintf(stderr, "[sf-dma #%ld] ch%d src=%02x:%04x -> $21%02x VRAMword=%04x size=%u | src_nz=%ld/%u src_distinct=%ld\n",
+                      s_dn, c, snes->dma->channel[c].aBank, snes->dma->channel[c].aAdr, b,
+                      snes->ppu->vramPointer, snes->dma->channel[c].size, snz, scan, distinct);
+              fflush(stderr); } } } }
       dma_startDma(snes->dma, val, false);
       while (dma_cycle(snes->dma)) {}
       break;

@@ -1096,6 +1096,17 @@ void gsu_run(Gsu* g, int maxCycles) {
   // GSU_DUMP_RAM=N: after the first run that plots >= N pixels, dump the full
   // Game Pak RAM and log SCBR/RAMBR/SCMR so we can locate the rendered back
   // buffer and compare it to the VRAM transfer source.
+  // SF_RENDER_TRACE=N: after each of the first N MDO_3D_DISPLAY runs, log the
+  // nonzero/distinct state of the $AC00 bitmap region so we can order it against
+  // the DMA-time sample (SF_DMA_TRACE) and see if a clear wipes it post-render.
+  if (entry_r15 == 0xac21) { static long s_rt = -2, s_rn = 0;
+    if (s_rt == -2) { const char* e = getenv("SF_RENDER_TRACE"); s_rt = e ? atol(e) : 0; }
+    if (s_rt > 0 && s_rn < s_rt && g->ram) { s_rn++;
+      long nz=0; uint8_t seen[256]; for(int k=0;k<256;k++) seen[k]=0; long dis=0;
+      for (uint32_t k=0xac00; k<0xae00; k++){ uint8_t bb=g->ram[k & (g->ramSize-1)]; if(bb)nz++; if(!seen[bb]){seen[bb]=1;dis++;} }
+      fprintf(stderr, "[sf-render #%ld] mdo_3d_display done: $AC00[0:0x200] nz=%ld distinct=%ld scbr=%02x\n",
+              s_rn, nz, dis, g->scbr); fflush(stderr); }
+  }
   // GSU_DUMP_RAM: dump Game Pak RAM right after the Nth MDO_3D_DISPLAY ($ac21)
   // run (the actual 3D scene render), capturing the SCBR that routine used, so
   // we locate the real rendered bitmap rather than an arbitrary math/dust run.
