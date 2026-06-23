@@ -65,4 +65,9 @@ uint16_t gsu_get_reg(Gsu* gsu, int n);
 void     gsu_set_reg(Gsu* gsu, int n, uint16_t val);
 uint16_t gsu_get_sfr(Gsu* gsu);
 
+// Cart-RAM / screen-base introspection (used by host-side framebuffer HLE).
+const uint8_t* gsu_ram_ptr(Gsu* gsu);
+uint32_t       gsu_ram_size(Gsu* gsu);
+uint8_t        gsu_get_scbr(Gsu* gsu);
+
 #endif // GSU_H

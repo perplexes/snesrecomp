@@ -335,6 +335,9 @@ bool gsu_is_running(Gsu* g) { return get_flag(g, GSU_SFR_GO); }
 uint16_t gsu_get_reg(Gsu* g, int n) { return g->r[n & 15]; }
 void gsu_set_reg(Gsu* g, int n, uint16_t v) { g->r[n & 15] = v; }
 uint16_t gsu_get_sfr(Gsu* g) { return g->sfr; }
+const uint8_t* gsu_ram_ptr(Gsu* g) { return g->ram; }
+uint32_t gsu_ram_size(Gsu* g) { return g->ramSize; }
+uint8_t gsu_get_scbr(Gsu* g) { return g->scbr; }
 
 // ---- Register window read/write ($3000-$303F) --------------------------
 

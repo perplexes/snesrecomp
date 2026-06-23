@@ -385,7 +385,7 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
               // values, e.g. all $00 or all $ff) or real sparse polygon data.
               long snz = 0; uint8_t seen[256]; for (int k=0;k<256;k++) seen[k]=0; long distinct=0;
               uint32_t saddr = (uint32_t)snes->dma->channel[c].aBank << 16 | snes->dma->channel[c].aAdr;
-              uint32_t scan = snes->dma->channel[c].size; if (scan > 0x2000) scan = 0x2000;
+              uint32_t scan = snes->dma->channel[c].size; if (scan > 0x6000) scan = 0x6000;
               for (uint32_t k = 0; k < scan; k++) {
                 uint8_t bb = snes_read(snes, saddr + k);
                 if (bb) snz++;
@@ -395,8 +395,22 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
                       s_dn, c, snes->dma->channel[c].aBank, snes->dma->channel[c].aAdr, b,
                       snes->ppu->vramPointer, snes->dma->channel[c].size, snz, scan, distinct);
               fflush(stderr); } } } }
-      dma_startDma(snes->dma, val, false);
-      while (dma_cycle(snes->dma)) {}
+      // Star Fox host-HLE: once the framebuffer blit is presenting renders
+      // (common_rtl.c), suppress the game's own bitmap1->VRAM transfer (src bank
+      // $70/$71 -> $2118/$2119) by masking those channels out of MDMAEN, so the
+      // broken beam-raced DMA can't overwrite the HLE render with a clear. All
+      // other DMAs (palette, OAM, bg offsets) pass through untouched.
+      { extern int g_sf_suppress_fb_dma; uint8_t run = val;
+        if (g_sf_suppress_fb_dma) {
+          for (int c = 0; c < 8; c++) if (run & (1 << c)) {
+            uint8_t b = snes->dma->channel[c].bAdr, bank = snes->dma->channel[c].aBank;
+            if ((b == 0x18 || b == 0x19) && (bank == 0x70 || bank == 0x71))
+              run &= (uint8_t)~(1 << c);
+          }
+        }
+        dma_startDma(snes->dma, run, false);
+        while (dma_cycle(snes->dma)) {}
+      }
       break;
     }
     case 0x420c: {

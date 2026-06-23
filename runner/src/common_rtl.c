@@ -22,6 +22,11 @@ const uint8 *g_rom;
 Ppu *g_ppu;
 Dma *g_dma;
 uint8 g_snesrecomp_last_hdmaen;
+// Set once the Star Fox host-HLE framebuffer blit has run (see the GSU-launch
+// path below). When set, snes.c suppresses the game's own bitmap1->VRAM DMA
+// (src bank $70/$71 -> $2118) so the broken beam-raced transfer can't overwrite
+// the HLE-presented render with a uniform clear. Other DMAs are untouched.
+int g_sf_suppress_fb_dma = 0;
 
 // Main-CPU cycle estimate, incremented per RDB_BLOCK_HOOK in debug_on_block_enter.
 // Used to pace APU catchup realistically: real SNES is ~3.58 MHz main / ~1.024 MHz APU,
@@ -249,6 +254,7 @@ void WriteReg(uint16 reg, uint8 value) {
           fflush(stderr); }
       }
       gsu_write(g_snes->gsu, reg, value);
+      uint16_t sf_entry_r15 = gsu_get_reg(g_snes->gsu, 15);  // launch PC, before the run mutates it
       if (reg == 0x301f && gsu_is_running(g_snes->gsu)) {
         // Run the GSU to completion, but bound it: a correct Star Fox render
         // finishes in well under this budget (max observed ~0.4M cycles). A
@@ -275,6 +281,65 @@ void WriteReg(uint16 reg, uint8 value) {
             fprintf(stderr, "[gsu] run exceeded %ld cyc without STOP — forcing halt to unblock CPU\n", s_cap); }
           gsu_force_stop(g_snes->gsu);
         }
+        // --- Star Fox host-HLE framebuffer presentation (2026-06-23) ----------
+        // The 3D bitmap reaches Game Pak RAM correctly (GSU renders real polygons
+        // into $AC00), but the game's framebuffer->VRAM transfer is a raster-IRQ
+        // beam-raced DMA spread across multiple frames, gated by a transbmp1
+        // handshake against the single shared cart-RAM pool. Our cooperative IRQ
+        // pump fires the handler during CPU spin-waits and CANNOT beam-race, so
+        // the atomic synchronous GSU clear (clronehalf) and the pump-driven DMA
+        // mis-order and the DMA copies a uniform clear instead of the render.
+        // (Proven: dump of $AC00 right after this run has 8 distinct colours, yet
+        // every game DMA reads src_distinct=1.) Rather than emulate timing the
+        // architecture forbids, HLE the *presentation* only: the instant
+        // MDO_3D_DISPLAY ($ac21) finishes, the framebuffer is guaranteed
+        // populated, so copy it straight to the VRAM buffer BG1 is displaying and
+        // force the screen on (Star Fox force-blanks for DMA timing and only
+        // un-blanks through the fade+inidisp-HDMA IRQ phases, which the pump can't
+        // sequence). Real renderer/palette/tilemap are untouched. Advised by
+        // codex gpt-5.5 + opus advisor (both: HLE presentation, not timing).
+        // Gate: SF_NO_HLE_BLIT=1 restores the faithful (currently black) path.
+        if (sf_entry_r15 == 0xac21 && g_ppu && gsu_ram_ptr(g_snes->gsu) &&
+            !getenv("SF_NO_HLE_BLIT")) {
+          const uint8_t *fb = gsu_ram_ptr(g_snes->gsu);  // $70:0000 base
+          uint32_t rmask = gsu_ram_size(g_snes->gsu) - 1;
+          // bitmap1 = $AC00, gameBMPSZ = $5400 (28*24*32, 4bpp) = 0x2A00 words,
+          // laid out contiguously $AC00..$FFFF -> one VRAM run.
+          // Dest = the buffer BG1 currently displays (char base from bgTileAdr
+          // low nibble: 0->word $0000, 3->word $3000), so what's on screen is the
+          // freshest render. vmap1 ($00:0046) is the game's intended target; the
+          // displayed-buffer choice avoids a one-frame stale/tearing mismatch.
+          // Write BOTH double-buffer slots ($0000 and $3000): the game toggles
+          // the BG1 char base (bgTileAdr) every frame, but the GSU renders to a
+          // single cart buffer, so duplicating into both slots guarantees the
+          // freshest render is whatever the PPU displays — no selection race.
+          static const uint16_t dests[2] = { 0x0000, 0x3000 };
+          uint16_t dest = dests[0];
+          for (int d = 0; d < 2; d++) {
+            uint16_t base = dests[d];
+            for (uint32_t w = 0; w < 0x2A00; w++) {
+              uint32_t b = 0xAC00 + (w << 1);
+              g_ppu->vram[(base + w) & 0x7fff] =
+                  (uint16_t)(fb[b & rmask] | (fb[(b + 1) & rmask] << 8));
+            }
+          }
+          // From now on, suppress the game's own bitmap1->VRAM DMA so its broken
+          // (uniform-clear) transfer can't overwrite this HLE-presented render.
+          g_sf_suppress_fb_dma = 1;
+          // Force display visible: clear force-blank, brightness 15. Keep the
+          // game's inidisp shadows in sync so its own setinidisp doesn't fight us.
+          g_ppu->inidisp = 0x0f;
+          g_ram[0x4655] = 0x0f;                           // xinidisp1
+          { static long s_bn = -2, s_seen = 0;
+            if (s_bn == -2) { const char *e = getenv("SF_HLE_BLIT_LOG"); s_bn = e ? atol(e) : 0; }
+            if (s_bn > 0 && s_seen < s_bn) { s_seen++;
+              long nz = 0; uint8_t seen[256]; for (int k=0;k<256;k++) seen[k]=0; long dis=0;
+              for (uint32_t w=0; w<0x2A00; w++){ uint16_t v=g_ppu->vram[(dest+w)&0x7fff]; uint8_t lo=v&0xff,hi=v>>8; if(lo){nz++;} if(hi){nz++;} if(!seen[lo]){seen[lo]=1;dis++;} if(!seen[hi]){seen[hi]=1;dis++;} }
+              fprintf(stderr, "[sf-hle-blit #%ld] $AC00->VRAM word $%04x: dest_nz=%ld dest_distinct=%ld inidisp->0f scbr=%02x\n",
+                      s_seen, dest, nz, dis, gsu_get_scbr(g_snes->gsu)); fflush(stderr); }
+          }
+        }
+        // ----------------------------------------------------------------------
       }
     }
     debug_server_on_reg_write(reg, value);
