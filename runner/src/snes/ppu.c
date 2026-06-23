@@ -285,6 +285,18 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, uint y, bool sub, uint layer, PpuZb
   int tileadr = PPU_bgTileAdr(ppu, layer), pixel;
   int tileadr1 = tileadr + 7 - (y & 0x7), tileadr0 = tileadr + (y & 0x7);
   const uint16 *addr;
+  // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
+  if (getenv("SF_BG_PROBE") && y == 100) {
+    static int s_dn[4] = {0,0,0,0};
+    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+      const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
+      fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
+              layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
+              ppu->bgXsc[layer], ppu->bgTileAdr);
+      for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n"); fflush(stderr);
+    }
+  }
   for (size_t windex = 0; windex < win.nr; windex++) {
     if (win.bits & (1 << windex))
       continue;  // layer is disabled for this window part
@@ -505,6 +517,18 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu, uint y, bool sub, uint layer
   int tileadr = PPU_bgTileAdr(ppu, layer), pixel;
   int tileadr1 = tileadr + 7 - (y & 0x7), tileadr0 = tileadr + (y & 0x7);
   const uint16 *addr;
+  // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
+  if (getenv("SF_BG_PROBE") && y == 100) {
+    static int s_dn[4] = {0,0,0,0};
+    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+      const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
+      fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
+              layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
+              ppu->bgXsc[layer], ppu->bgTileAdr);
+      for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n"); fflush(stderr);
+    }
+  }
   for (size_t windex = 0; windex < win.nr; windex++) {
     if (win.bits & (1 << windex))
       continue;  // layer is disabled for this window part
@@ -564,6 +588,18 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, int y, bool sub, uint layer,
   int tileadr = PPU_bgTileAdr(ppu, layer), pixel;
   int tileadr1 = tileadr + 7 - (y & 0x7), tileadr0 = tileadr + (y & 0x7);
   const uint16 *addr;
+  // SF_BG_PROBE: one-shot dump of BG<layer> fetch state for scanline 100.
+  if (getenv("SF_BG_PROBE") && y == 100) {
+    static int s_dn[4] = {0,0,0,0};
+    if (!s_dn[layer & 3]) { s_dn[layer & 3] = 1;
+      const uint16 *row = &ppu->vram[(PPU_bgTilemapAdr(ppu, layer) + (((y) >> 3) & 0x1f) * 32) & 0x7fff];
+      fprintf(stderr, "[bg-probe L%u] tilemapAdr=$%04x tileAdr=$%04x hs=%u vs=%u sc=$%02x nba=$%04x tiles:",
+              layer, PPU_bgTilemapAdr(ppu, layer), tileadr, ppu->hScroll[layer], ppu->vScroll[layer],
+              ppu->bgXsc[layer], ppu->bgTileAdr);
+      for (int i = 0; i < 16; i++) { uint16 t = row[i]; fprintf(stderr, " %u(p%u)", t & 0x3ff, (t >> 10) & 7); }
+      fprintf(stderr, "\n"); fflush(stderr);
+    }
+  }
   for (size_t windex = 0; windex < win.nr; windex++) {
     if (win.bits & (1 << windex))
       continue;  // layer is disabled for this window part
