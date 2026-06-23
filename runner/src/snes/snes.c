@@ -395,16 +395,16 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
                       s_dn, c, snes->dma->channel[c].aBank, snes->dma->channel[c].aAdr, b,
                       snes->ppu->vramPointer, snes->dma->channel[c].size, snz, scan, distinct);
               fflush(stderr); } } } }
-      // Star Fox host-HLE: once the framebuffer blit is presenting renders
-      // (common_rtl.c), suppress the game's own bitmap1->VRAM transfer (src bank
-      // $70/$71 -> $2118/$2119) by masking those channels out of MDMAEN, so the
-      // broken beam-raced DMA can't overwrite the HLE render with a clear. All
-      // other DMAs (palette, OAM, bg offsets) pass through untouched.
-      { extern int g_sf_suppress_fb_dma; uint8_t run = val;
-        if (g_sf_suppress_fb_dma) {
+      // Game-registered DMA suppression (game-agnostic): when a game layer is
+      // HLE-presenting a coprocessor framebuffer, it can mask its own now-
+      // redundant transfer channels out of this MDMAEN trigger so the broken
+      // beam-raced DMA can't overwrite the presented frame. The engine knows no
+      // game specifics — it just asks the hook per active channel. All other
+      // DMAs pass through untouched. NULL hook = no suppression.
+      { extern int (*g_dma_suppress)(uint8_t bAdr, uint8_t aBank); uint8_t run = val;
+        if (g_dma_suppress) {
           for (int c = 0; c < 8; c++) if (run & (1 << c)) {
-            uint8_t b = snes->dma->channel[c].bAdr, bank = snes->dma->channel[c].aBank;
-            if ((b == 0x18 || b == 0x19) && (bank == 0x70 || bank == 0x71))
+            if (g_dma_suppress(snes->dma->channel[c].bAdr, snes->dma->channel[c].aBank))
               run &= (uint8_t)~(1 << c);
           }
         }

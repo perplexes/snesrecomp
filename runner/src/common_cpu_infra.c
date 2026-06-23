@@ -237,6 +237,8 @@ jmp_buf g_watchdog_jmp;
 int g_watchdog_tripped;
 CoopIrqPumpFunc g_coop_irq_pump;  /* game-registered cooperative IRQ pump */
 HostPresentFunc g_host_present_hook; /* host-registered frame present hook */
+GsuFrameDoneFunc g_gsu_frame_done; /* game-registered GSU/coproc frame presenter */
+DmaSuppressFunc g_dma_suppress;    /* game-registered MDMAEN channel suppressor */
 static int g_in_coop_pump;        /* reentrancy guard (pump runs recompiled code) */
 
 void WatchdogFrameStart(void) {

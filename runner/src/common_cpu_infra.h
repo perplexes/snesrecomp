@@ -48,6 +48,28 @@ extern CoopIrqPumpFunc g_coop_irq_pump;
  * runs leave it NULL. Return nonzero to request shutdown (window closed). */
 typedef int (*HostPresentFunc)(void);
 extern HostPresentFunc g_host_present_hook;
+
+/* GSU/coprocessor frame-done hook (game-agnostic). The engine runs the Super FX
+ * to completion on an R15 launch (see common_rtl.c). A coprocessor game renders
+ * into Game Pak RAM and then transfers the result to VRAM through a timing-
+ * sensitive, often beam-raced path the static recomp can't reproduce. When a
+ * launch completes, the engine calls this hook with the launch entry PC so a
+ * game layer can HLE-present the finished framebuffer (copy coproc RAM -> VRAM,
+ * set display state) WITHOUT the engine knowing any game specifics. entry_pc is
+ * the coprocessor PC captured at launch, before the run mutated it. NULL = the
+ * engine presents nothing (faithful path). */
+typedef void (*GsuFrameDoneFunc)(uint16 entry_pc);
+extern GsuFrameDoneFunc g_gsu_frame_done;
+
+/* DMA channel suppression hook (game-agnostic). Returns nonzero if the channel
+ * described by (bAdr = $21xx B-bus dest low byte, aBank = A-bus source bank)
+ * should be MASKED OUT of an MDMAEN ($420B) trigger. A game layer that HLE-
+ * presents a coprocessor framebuffer registers this to stop the game's own
+ * now-redundant/broken transfer from overwriting the presented frame. The game
+ * owns any "presenting yet" state. NULL = no suppression (all channels run). */
+typedef int (*DmaSuppressFunc)(uint8 bAdr, uint8 aBank);
+extern DmaSuppressFunc g_dma_suppress;
+
 void RecompStackPush(const char *name);
 void RecompStackPop(void);
 /* Per-frame 65816 entry-S tracking for return-to-ancestor RTS resolution
