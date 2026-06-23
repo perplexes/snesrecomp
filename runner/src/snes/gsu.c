@@ -251,7 +251,10 @@ static uint32_t plot_char_base(Gsu* g, int charX, int charY) {
 
 // 8bpp char: 8 rows. Each row is represented (bsnes-style) as two pairs of
 // planes: bytes [row*2 + plane_pair*16]. Bit (7 - (x&7)) selects the column.
+// Diagnostic: total PLOT pixel writes since process start (GSU_PLOT_LOG).
+unsigned long g_gsu_plot_count = 0;
 static void plot_pixel_8bpp(Gsu* g, int x, int y, uint8_t color) {
+  g_gsu_plot_count++;
   int charX = x >> 3, charY = y >> 3;
   int px = x & 7, py = y & 7;
   uint32_t cbase = plot_char_base(g, charX, charY);
@@ -1077,6 +1080,22 @@ void gsu_run(Gsu* g, int maxCycles) {
   }
   while (gsu_is_running(g) && cycles < maxCycles) {
     cycles += gsu_step(g);
+  }
+  // GSU_DUMP_RAM=N: after the first run that plots >= N pixels, dump the full
+  // Game Pak RAM and log SCBR/RAMBR/SCMR so we can locate the rendered back
+  // buffer and compare it to the VRAM transfer source.
+  { static long s_dr = -2; if (s_dr == -2) { const char* e = getenv("GSU_DUMP_RAM"); s_dr = e ? atol(e) : 0; }
+    if (s_dr > 0) { static unsigned long s_pp = 0; extern unsigned long g_gsu_plot_count;
+      static int s_done = 0;
+      if (!s_done && (g_gsu_plot_count - s_pp) >= (unsigned long)s_dr) {
+        s_done = 1;
+        FILE* f = fopen("/tmp/sf_gpram.bin", "wb");
+        if (f && g->ram) { fwrite(g->ram, 1, g->ramSize, f); fclose(f); }
+        fprintf(stderr, "[gsu-dump] scbr=%02x rambr=%02x scmr=%02x ramSize=%u plots=%lu -> /tmp/sf_gpram.bin\n",
+                g->scbr, g->rambr, g->scmr, g->ramSize, g_gsu_plot_count); fflush(stderr);
+      }
+      s_pp = g_gsu_plot_count;
+    }
   }
 }
 

@@ -238,6 +238,16 @@ void WriteReg(uint16 reg, uint8 value) {
     // chip; run it synchronously to completion so the host busy-wait on the
     // SFR GO bit falls through on the next read.
     if (g_snes->hasGsu) {
+      // GSU_WRITE_LOG=N: trace the first N writes to R15 ($301E/$301F) so we can
+      // tell whether the recompiled runmario_l/do_3d_display_l store reaches the
+      // MMIO path at all (and whether it sets the GO bit).
+      if (reg == 0x301e || reg == 0x301f) {
+        static long s_wl = -2, s_wn = 0;
+        if (s_wl == -2) { const char* e = getenv("GSU_WRITE_LOG"); s_wl = e ? atol(e) : 0; }
+        if (s_wl > 0 && s_wn < s_wl) { s_wn++;
+          fprintf(stderr, "[gsu-r15-write #%ld] reg=%04x val=%02x\n", s_wn, reg, value);
+          fflush(stderr); }
+      }
       gsu_write(g_snes->gsu, reg, value);
       if (reg == 0x301f && gsu_is_running(g_snes->gsu)) {
         // Run the GSU to completion, but bound it: a correct Star Fox render
@@ -255,8 +265,10 @@ void WriteReg(uint16 reg, uint8 value) {
         { static long s_ll = -2, s_n = 0;
           if (s_ll == -2) { const char* e = getenv("GSU_LAUNCH_LOG"); s_ll = e ? atol(e) : 0; }
           if (s_ll > 0 && s_n < s_ll) { s_n++;
-            fprintf(stderr, "[gsu-launch #%ld] still_running_after_cap=%d\n",
-                    s_n, gsu_is_running(g_snes->gsu)); } }
+            extern unsigned long g_gsu_plot_count; static unsigned long s_prev_plot = 0;
+            unsigned long dp = g_gsu_plot_count - s_prev_plot; s_prev_plot = g_gsu_plot_count;
+            fprintf(stderr, "[gsu-launch #%ld] plots_this_run=%lu total_plots=%lu still=%d\n",
+                    s_n, dp, g_gsu_plot_count, gsu_is_running(g_snes->gsu)); fflush(stderr); } }
         if (gsu_is_running(g_snes->gsu)) {
           static long s_warned = 0;
           if (s_warned < 8) { s_warned++;
