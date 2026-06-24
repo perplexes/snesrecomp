@@ -273,6 +273,44 @@ void WatchdogFrameStart(void) {
 
 // Called at loop headers in generated code — detect infinite loops
 void WatchdogCheck(void) {
+  /* RECOMP_STACK_WATCH=lo[:hi]: generic stack-pointer drift detector.
+   * Stack imbalance is a recurring static-recompiler failure mode: a function
+   * that returns via the non-local-return path can leave pushed return bytes
+   * on the hardware stack, so cpu->S leaks downward and eventually overruns
+   * data RAM. This reports each NEW minimum S within the watch band [lo,hi),
+   * naming the recompiled function — pinpointing where the leak happens.
+   * Default band [0x0300,0x0400) catches a stack that has run below page-1
+   * usage into low data RAM. Off unless the env var is set. */
+  {
+    static int s_init = 0;
+    static uint16 s_lo = 0, s_hi = 0;
+    if (!s_init) {
+      s_init = 1;
+      const char *e = getenv("RECOMP_STACK_WATCH");
+      if (e && e[0]) {
+        unsigned lo = 0x0300, hi = 0x0400;
+        sscanf(e, "%x:%x", &lo, &hi);
+        s_lo = (uint16)lo; s_hi = (uint16)hi;
+      }
+    }
+    if (s_hi) {
+      extern CpuState g_cpu;
+      static uint16 s_minS = 0xffff;
+      static int s_hits = 0;
+      uint16 nowS = g_cpu.S;
+      if (s_minS == 0xffff) s_minS = s_hi;
+      if (nowS >= s_lo && nowS < s_minS && s_hits < 16) {
+        s_hits++;
+        s_minS = nowS;
+        extern const char *g_last_recomp_func;
+        extern const char *g_recomp_stack[]; extern int g_recomp_stack_top;
+        fprintf(stderr, "[stack-watch] new-min S=%04x in %s callstack:\n",
+                nowS, g_last_recomp_func);
+        for (int i = g_recomp_stack_top - 1; i >= 0 && i > g_recomp_stack_top - 12; i--)
+          fprintf(stderr, "    [%d] %s\n", g_recomp_stack_top-1-i, g_recomp_stack[i]);
+      }
+    }
+  }
   if (!g_watchdog_enabled) return;
   // Only check clock() every 10000 iterations to avoid overhead
   if (++g_watchdog_counter < 10000) return;
