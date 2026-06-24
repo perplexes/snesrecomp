@@ -33,6 +33,37 @@
 
 CpuState g_cpu;
 
+/* WRAM read-pins (game-registered). When a pin is active, cpu_read8 returns the
+ * pinned value for that g_ram offset instead of the backing byte. A generic
+ * primitive: the engine holds no game addresses; a game registers offsets it
+ * needs held (e.g. to HLE a flag a host-driven boot/carve can't establish). The
+ * g_wram_pin_any flag keeps the read hot path free when nothing is pinned. */
+WramReadPin g_wram_pins[CPU_WRAM_PIN_MAX];
+uint8_t     g_wram_pin_any = 0;
+
+void cpu_pin_wram_read(uint32_t off, uint8 val) {
+    for (int i = 0; i < CPU_WRAM_PIN_MAX; i++) {
+        if (g_wram_pins[i].active && g_wram_pins[i].off == off) {
+            g_wram_pins[i].val = val; return;  /* update existing */
+        }
+    }
+    for (int i = 0; i < CPU_WRAM_PIN_MAX; i++) {
+        if (!g_wram_pins[i].active) {
+            g_wram_pins[i].off = off; g_wram_pins[i].val = val;
+            g_wram_pins[i].active = 1; g_wram_pin_any = 1; return;
+        }
+    }
+}
+
+void cpu_unpin_wram_read(uint32_t off) {
+    int any = 0;
+    for (int i = 0; i < CPU_WRAM_PIN_MAX; i++) {
+        if (g_wram_pins[i].active && g_wram_pins[i].off == off) g_wram_pins[i].active = 0;
+        if (g_wram_pins[i].active) any = 1;
+    }
+    g_wram_pin_any = (uint8_t)any;
+}
+
 /* Map a 24-bit logical address onto a g_ram offset. Returns -1 for
  * addresses that are NOT WRAM — the caller routes those to the HW-reg
  * helpers (WriteReg/ReadReg) or to ROM. */
@@ -197,7 +228,19 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
                               addr, bank, cpu_ram_offset(bank, addr), is_hw_reg(bank, addr));
     }
     int off = cpu_ram_offset(bank, addr);
-    if (off >= 0) return cpu->ram[off];
+    if (off >= 0) {
+        /* WRAM read-pins: a game may pin specific WRAM offsets to a fixed value
+         * (see cpu_pin_wram_read). The g_wram_pin_any flag keeps this branch
+         * free when no pins are armed. Used to HLE state a host-driven boot/carve
+         * can't otherwise establish (e.g. a fade-complete flag). Engine carries
+         * no game addresses — the game registers them. */
+        if (g_wram_pin_any) {
+            for (int i = 0; i < CPU_WRAM_PIN_MAX; i++)
+                if (g_wram_pins[i].active && g_wram_pins[i].off == (uint32_t)off)
+                    return g_wram_pins[i].val;
+        }
+        return cpu->ram[off];
+    }
     if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 1, 0); return ReadReg(addr); }
     int sram = cpu_sram_offset(bank, addr);
     if (sram >= 0) return g_sram[sram];

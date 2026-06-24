@@ -377,6 +377,16 @@ static inline void cpu_push_jsl_return_frame(CpuState *cpu) {
  * Caller supplies the ram pointer (typically &g_ram[0]). */
 void cpu_state_init(CpuState *cpu, uint8 *ram);
 
+/* WRAM read-pins (game-registered). When armed, cpu_read8 returns the pinned
+ * value for a given g_ram offset. Generic: the engine holds no game addresses.
+ * Use to HLE a flag a host-driven boot/carve can't otherwise establish. */
+#define CPU_WRAM_PIN_MAX 8
+typedef struct { uint32_t off; uint8 val; uint8 active; } WramReadPin;
+extern WramReadPin g_wram_pins[CPU_WRAM_PIN_MAX];
+extern uint8_t     g_wram_pin_any;
+void cpu_pin_wram_read(uint32_t off, uint8 val);   /* register / update a pin */
+void cpu_unpin_wram_read(uint32_t off);            /* remove a pin */
+
 /* The singleton runtime CpuState. Defined alongside g_ram in
  * common_rtl.c. v2-recompiled code passes &g_cpu when it doesn't
  * thread `cpu` explicitly. */
