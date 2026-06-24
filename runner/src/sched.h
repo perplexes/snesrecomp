@@ -74,10 +74,11 @@ void sched_frame_start(void);
  *        many ticks land above scanline 225. Reentrancy-guarded.
  *        Calls g_sched_nmi_handler() if non-NULL; increments snes_frame_counter.
  *
- *   IRQ: fires when current scanline == g_snes->vTimer AND g_snes->vIrqEnabled
- *        AND cpu._flag_I == 0 (interrupts enabled) AND !g_in_coop_pump.
+ *   IRQ: fires when the tick's scanline range crosses vTimer (prev < vTimer <=
+ *        current) AND g_snes->vIrqEnabled AND cpu._flag_I == 0 AND !g_in_coop_pump.
  *        Delegates to g_coop_irq_pump() (same handler the watchdog pump uses).
- *        Edge-latched per scanline: only one IRQ delivery per VTIMER crossing.
+ *        Edge-latched per vTimer value per frame: only one delivery even if
+ *        multiple ticks land in the same scanline neighborhood.
  *
  * Must only be called from WatchdogCheck (i.e., the game's recompiled
  * execution thread). Not thread-safe.
