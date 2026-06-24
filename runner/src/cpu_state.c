@@ -359,6 +359,54 @@ const DispatchLogEntry *cpu_dispatch_log_at(unsigned i) {
     return &g_dispatch_log[i % DISPATCH_LOG_CAP];
 }
 
+/* --- Dispatch-miss profiler (SF_DUMP_MISSES) ----------------------------
+ * Accumulates the unique set of (target, source, mx) dispatch misses and
+ * writes them, grouped by source, to the named file at exit. Used to
+ * enumerate coroutine resume PCs that aren't yet registered func entries. */
+#define DISPATCH_MISS_CAP 8192
+typedef struct { uint32_t pc24, source_pc24; uint8_t mx_idx; } DispatchMiss;
+static DispatchMiss g_dispatch_miss[DISPATCH_MISS_CAP];
+static unsigned g_dispatch_miss_count;
+static int g_dispatch_miss_atexit_armed;
+
+static void _dispatch_miss_dump(void) {
+    const char *path = getenv("SF_DUMP_MISSES");
+    if (!path) return;
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "# unique dispatch misses (target <- source) — resume-PC worklist\n");
+    fprintf(f, "# count=%u\n", g_dispatch_miss_count);
+    /* simple grouping: sort by source then target via insertion print */
+    for (unsigned i = 0; i < g_dispatch_miss_count; i++) {
+        fprintf(f, "%06X mx=%u from=%06X\n",
+                g_dispatch_miss[i].pc24, g_dispatch_miss[i].mx_idx,
+                g_dispatch_miss[i].source_pc24);
+    }
+    fclose(f);
+}
+
+void cpu_record_dispatch_miss(uint32_t pc24, uint32_t source_pc24, unsigned mx_idx) {
+    if (!g_dispatch_miss_atexit_armed) {
+        atexit(_dispatch_miss_dump);
+        g_dispatch_miss_atexit_armed = 1;
+    }
+    for (unsigned i = 0; i < g_dispatch_miss_count; i++) {
+        if (g_dispatch_miss[i].pc24 == pc24 &&
+            g_dispatch_miss[i].source_pc24 == source_pc24 &&
+            g_dispatch_miss[i].mx_idx == (uint8_t)mx_idx)
+            return; /* already recorded */
+    }
+    if (g_dispatch_miss_count >= DISPATCH_MISS_CAP) return;
+    g_dispatch_miss[g_dispatch_miss_count].pc24 = pc24;
+    g_dispatch_miss[g_dispatch_miss_count].source_pc24 = source_pc24;
+    g_dispatch_miss[g_dispatch_miss_count].mx_idx = (uint8_t)mx_idx;
+    g_dispatch_miss_count++;
+    /* Re-dump on every new unique miss: the process runs forever and is
+     * killed with SIGKILL (atexit never fires), so persist incrementally.
+     * Uniques converge quickly, so the rewrite cost is bounded. */
+    _dispatch_miss_dump();
+}
+
 static RecompReturn (*_cpu_dispatch_lookup(CpuState *cpu, uint32 pc24))(CpuState *) {
     unsigned lo = 0;
     unsigned hi = g_dispatch_table_count;
@@ -395,6 +443,23 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
         }
     }
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
+    /* SF_DUMP_MISSES: accumulate the unique set of dispatch MISSES (target,
+     * source, mx) and dump them to the named file at exit. Drives the
+     * coroutine-resume enumeration: a manufactured-RTL dispatcher (do_strat,
+     * dostrats, jumptostate) that resumes a computed pointer lands here as a
+     * miss when the resume PC isn't yet a registered func entry. The dump,
+     * grouped by source, is the worklist of resume PCs to register. */
+    if (fp == NULL) {
+        static int s_dm = -1;
+        static const char *s_dm_path = NULL;
+        if (s_dm < 0) {
+            s_dm_path = getenv("SF_DUMP_MISSES");
+            s_dm = s_dm_path ? 1 : 0;
+        }
+        if (s_dm) {
+            cpu_record_dispatch_miss(pc24, source_pc24, mx_idx);
+        }
+    }
     /* SF_TRACE_DISP: log dispatches to the player-istrat region ($0BB5xx) and
      * any dispatch MISS, to catch silently-skipped strats (e.g. player_Istrat
      * $0BB53C not registered for the dispatched mx mode → playpt never set). */
