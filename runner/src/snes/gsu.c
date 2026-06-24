@@ -265,6 +265,13 @@ static uint32_t plot_char_base(Gsu* g, int charX, int charY) {
 // Diagnostic: total PLOT pixel writes since process start (GSU_PLOT_LOG).
 unsigned long g_gsu_plot_count = 0;
 static void plot_pixel_8bpp(Gsu* g, int x, int y, uint8_t color) {
+  /* Diagnostic: log scbr+base on the first few plots so we can find the real bitmap. */
+  static long s_plotlog = -1;
+  if (s_plotlog < 0) { const char *e = getenv("GSU_PLOT_LOG"); s_plotlog = e ? atol(e) : 0; }
+  if (s_plotlog > 0 && g_gsu_plot_count < (unsigned long)s_plotlog)
+    fprintf(stderr, "[plot #%lu] x=%d y=%d color=%02x scbr=%02x rambr=%02x pc=%02x:%04x base=%05x\n",
+            g_gsu_plot_count, x, y, color, g->scbr, g->rambr, g->pbr, g->r[15],
+            (unsigned)g->scbr << 10);
   g_gsu_plot_count++;
   int charX = x >> 3, charY = y >> 3;
   int px = x & 7, py = y & 7;
