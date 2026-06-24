@@ -232,7 +232,7 @@ void RecompStackPop(void) {
 
 // Frame watchdog: detect infinite loops in generated code.
 // Set before calling run_frame, checked by generated code periodically.
-static clock_t g_frame_start_clock;
+clock_t g_frame_start_clock;
 static int g_watchdog_enabled;
 static int g_watchdog_counter;
 jmp_buf g_watchdog_jmp;
@@ -255,6 +255,16 @@ void WatchdogFrameStart(void) {
   if (!s_sched_init) {
     s_sched_init = 1;
     g_sched_enabled = (getenv("SF_SCHED") && getenv("SF_SCHED")[0] == '1');
+    /* Allow runtime override of block cost for calibration.
+     * SF_SCHED_BLOCK_COST=N sets N cycles per WatchdogCheck tick. */
+    if (g_sched_enabled) {
+      const char *bc_env = getenv("SF_SCHED_BLOCK_COST");
+      if (bc_env && bc_env[0]) {
+        long bc = atol(bc_env);
+        if (bc > 0 && bc <= 1000000)
+          g_sched_block_cost = (uint32_t)bc;
+      }
+    }
   }
   if (g_sched_enabled) {
     sched_frame_start();
@@ -272,18 +282,37 @@ void WatchdogCheck(void) {
    * block tick. sched_tick() calls g_coop_irq_pump internally when the IRQ
    * scanline is reached.
    *
-   * BOOT EXCEPTION: during boot (snes_frame_counter == 0), the game's IRQ
-   * handler hasn't been set up properly yet and no hardware IRQ enable writes
-   * have necessarily been committed. Fall back to the old cooperative pump so
-   * transfer_l spin-waits still advance during boot. Once the first NMI fires
-   * (snes_frame_counter > 0) the scheduler takes full control.
+   * The scheduler activates as soon as V-IRQ is enabled (g_snes->vIrqEnabled).
+   * This is the correct transition point for Star Fox: it writes $4200=$20
+   * (V-IRQ enable, NMI off) when it is ready for normal frame-driven operation,
+   * so the scheduler takes over exactly then. During boot (APU upload, setup)
+   * vIrqEnabled is false and the old cooperative pump handles spin-waits.
    *
-   * The old pump path is skipped once the scheduler is active (post-boot) so
-   * the pump does not also fire unconditionally every 10k blocks. */
-  if (g_sched_enabled && snes_frame_counter > 0) {
-    /* sched_tick handles reentrancy internally. */
+   * This replaces the previous gate (snes_frame_counter > 0) which was
+   * NMI-based and never advanced for games that use only V-IRQ (like Star Fox).
+   *
+   * The old pump path runs during boot and when SF_SCHED is off, so the
+   * pump does not also fire unconditionally every 10k blocks once the scheduler
+   * is active.
+   *
+   * IMPORTANT: skip sched_tick when we are inside the pump (g_in_coop_pump).
+   * irqcode_l calls WatchdogCheck from its block prologues, which would advance
+   * g_sched_prev_scanline and potentially mark VBlank as "already past" before
+   * the outer sched_tick can detect the crossing. The IRQ handler runs at
+   * simulated cycle-time 207 and should not advance the clock further; all
+   * cycle advancement happens in the outer (non-pump) WatchdogCheck calls. */
+  if (g_sched_enabled && g_snes && g_snes->vIrqEnabled && !g_in_coop_pump) {
+    int pre_frame = snes_frame_counter;
     sched_tick(SCHED_BLOCK_COST);
-    /* Fall through to the hang check — the scheduler path still needs the
+    /* Reset the hang timer whenever snes_frame_counter advances (the
+     * scheduler crossed a VBlank and the game is making forward progress).
+     * Without this reset, the 5s watchdog trips even on healthy scheduler
+     * runs because g_frame_start_clock is only reset inside the old pump
+     * path (which the scheduler bypasses). */
+    if (snes_frame_counter != pre_frame) {
+      g_frame_start_clock = clock();
+    }
+    /* Fall through to the hang check -- the scheduler path still needs the
      * 5-second watchdog to fire on genuine hangs. */
     goto watchdog_hang_check;
   }
