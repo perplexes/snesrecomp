@@ -1,4 +1,5 @@
 #include "common_cpu_infra.h"
+#include "sched.h"
 #include "framedump.h"
 #include "types.h"
 #include "common_rtl.h"
@@ -12,6 +13,7 @@
 #include <setjmp.h>
 #include <string.h>
 #include <time.h>
+#include <stdlib.h>
 
 Snes *g_snes;
 Cpu *g_snes_cpu;
@@ -239,7 +241,7 @@ CoopIrqPumpFunc g_coop_irq_pump;  /* game-registered cooperative IRQ pump */
 HostPresentFunc g_host_present_hook; /* host-registered frame present hook */
 GsuFrameDoneFunc g_gsu_frame_done; /* game-registered GSU/coproc frame presenter */
 DmaSuppressFunc g_dma_suppress;    /* game-registered MDMAEN channel suppressor */
-static int g_in_coop_pump;        /* reentrancy guard (pump runs recompiled code) */
+int g_in_coop_pump;               /* reentrancy guard (pump runs recompiled code) */
 
 void WatchdogFrameStart(void) {
   g_frame_start_clock = clock();
@@ -248,6 +250,15 @@ void WatchdogFrameStart(void) {
   g_watchdog_counter = 0;
   g_recomp_stack_top = 0;
   g_tailcall_context_valid = 0;
+  /* Initialise scheduler on first call. Reads SF_SCHED env var once. */
+  static int s_sched_init = 0;
+  if (!s_sched_init) {
+    s_sched_init = 1;
+    g_sched_enabled = (getenv("SF_SCHED") && getenv("SF_SCHED")[0] == '1');
+  }
+  if (g_sched_enabled) {
+    sched_frame_start();
+  }
 }
 
 // Called at loop headers in generated code — detect infinite loops
@@ -256,12 +267,33 @@ void WatchdogCheck(void) {
   // Only check clock() every 10000 iterations to avoid overhead
   if (++g_watchdog_counter < 10000) return;
   g_watchdog_counter = 0;
+  /* Scheduler path (SF_SCHED=1): advance the cycle/scanline clock and deliver
+   * NMI/IRQ at the architecturally correct scanline instead of at every ~10k
+   * block tick. sched_tick() calls g_coop_irq_pump internally when the IRQ
+   * scanline is reached.
+   *
+   * BOOT EXCEPTION: during boot (snes_frame_counter == 0), the game's IRQ
+   * handler hasn't been set up properly yet and no hardware IRQ enable writes
+   * have necessarily been committed. Fall back to the old cooperative pump so
+   * transfer_l spin-waits still advance during boot. Once the first NMI fires
+   * (snes_frame_counter > 0) the scheduler takes full control.
+   *
+   * The old pump path is skipped once the scheduler is active (post-boot) so
+   * the pump does not also fire unconditionally every 10k blocks. */
+  if (g_sched_enabled && snes_frame_counter > 0) {
+    /* sched_tick handles reentrancy internally. */
+    sched_tick(SCHED_BLOCK_COST);
+    /* Fall through to the hang check — the scheduler path still needs the
+     * 5-second watchdog to fire on genuine hangs. */
+    goto watchdog_hang_check;
+  }
   /* Cooperative IRQ pump: advance interrupt-only hardware so spin-waits on
    * IRQ-set flags fall through (see CoopIrqPumpFunc in the header). Guarded
    * against reentrancy because the pump itself runs recompiled code whose
    * blocks call WatchdogCheck. Runs during boot too (before the
    * frame_counter==0 gate below), since Star Fox's boot init already waits
-   * on the IRQ-driven transfer_l double-buffer flags. */
+   * on the IRQ-driven transfer_l double-buffer flags. Also runs post-boot
+   * when the scheduler is NOT enabled (g_sched_enabled == 0). */
   if (g_coop_irq_pump && !g_in_coop_pump) {
     g_in_coop_pump = 1;
     int progressed = g_coop_irq_pump();
@@ -271,6 +303,7 @@ void WatchdogCheck(void) {
       return;
     }
   }
+watchdog_hang_check:;
   double elapsed = (double)(clock() - g_frame_start_clock) / CLOCKS_PER_SEC;
   /* Boot has no watchdog. I_RESET runs once and uploads the SPC
    * engine + samples through the IPL handshake, which is real-time

@@ -38,6 +38,11 @@ void WatchdogFrameStart(void);
  * 5s hang timer). Reentrancy is guarded by the framework. NULL = disabled. */
 typedef int (*CoopIrqPumpFunc)(void);
 extern CoopIrqPumpFunc g_coop_irq_pump;
+/* Reentrancy guard: set to 1 while g_coop_irq_pump (or a scheduler-delivered
+ * interrupt) is running. Prevents WatchdogCheck from recursively firing
+ * another interrupt from within the recompiled interrupt handler.
+ * Exposed so sched.c can read and set it alongside the pump. */
+extern int g_in_coop_pump;
 
 /* Host frame-present hook (game-agnostic). When a game's whole boot + main
  * loop runs synchronously inside I_RESET and never returns to the host frame
