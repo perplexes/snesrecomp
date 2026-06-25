@@ -1740,7 +1740,17 @@ def _emit_call(op: Call) -> List[str]:
         # JSL: PB save/restore wraps the switch. The propagation
         # block sits AFTER the PB restore so the caller's PB is
         # correct on the SKIP_N return path.
-        lines = ["{"]
+        lines = ["{",
+            # Stack-neutrality (2026-06-25, codex gpt-5.5 + opus advisor): a
+            # JSL paired with the callee's RTL is caller-neutral — the caller's
+            # S after the callee returns NORMAL must equal its S before the
+            # return-frame push. Capture it here; restore it on the NORMAL path
+            # below. No-op when the callee already balanced; it CORRECTS the
+            # residual S drift a coroutine ancestor-skip leaves when its SKIP_N
+            # decrements to NORMAL at an intermediate call-site (the strat ->
+            # dostrats -> transfer_l -> intro_l drift that killed the boot loop).
+            "  uint16 _call_s = cpu->S;",
+        ]
         lines += _emit_return_frame_push(op)
         lines += [
             "  uint8 _saved_pb = cpu->PB;",
@@ -1759,6 +1769,7 @@ def _emit_call(op: Call) -> List[str]:
             "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_SKIP_PROPAGATION);",
             "    return (RecompReturn)((int)_r - 1);",
             "  }",
+            "  cpu->S = _call_s;  /* stack-neutrality restore (see _call_s above) */",
             "}",
         ])
         return lines
@@ -1766,7 +1777,12 @@ def _emit_call(op: Call) -> List[str]:
     # NB: emit_function.py's per-line scanner auto-injects a
     # RecompStackPop() before any line whose stripped text starts with
     # "return" — that includes the SKIP propagation `return` below.
-    lines = ["{"]
+    lines = ["{",
+        # Stack-neutrality (see the JSL path above for rationale): JSR + RTS is
+        # caller-neutral; restore S on the NORMAL path to correct coroutine
+        # ancestor-skip S drift.
+        "  uint16 _call_s = cpu->S;",
+    ]
     lines += _emit_return_frame_push(op)
     lines += [
         "  RecompReturn _r;",
@@ -1784,6 +1800,7 @@ def _emit_call(op: Call) -> List[str]:
         "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_SKIP_PROPAGATION);",
         "    return (RecompReturn)((int)_r - 1);",
         "  }",
+        "  cpu->S = _call_s;  /* stack-neutrality restore (see _call_s above) */",
         "}",
     ])
     return lines
