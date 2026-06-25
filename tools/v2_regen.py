@@ -48,6 +48,7 @@ from v2.codegen import (  # noqa: E402
 from v2.decoder import (  # noqa: E402
     classify_dispatch_helper, decode_function, analyze_function_exit_mx,
     set_decode_cache_enabled, clear_decode_cache, decode_cache_stats,
+    set_global_inline_skip,
 )
 from v2.emit_bank import BankEntry, emit_bank  # noqa: E402
 from v2.wrapper_autoroute import detect_and_route as autoroute_wrappers, format_fix_summary  # noqa: E402
@@ -413,6 +414,20 @@ def _apply_variant_prune(parsed, cumulative_pruned: set) -> dict:
     return vvm
 
 
+def _build_callee_inline_skip(parsed) -> dict:
+    """Build the JSR-inline-param skip map {target_pc24: N} from cfg
+    `inline_skip:N` annotations. Static (no variant/fixpoint dependence):
+    a JSR/JSL to one of these helpers always skips N inline param bytes.
+    See decoder._labeled_successors / starfox bg2chr-style helpers."""
+    skip: dict = {}
+    for bank, _cfg_path, cfg in parsed:
+        for entry in cfg.entries:
+            n = getattr(entry, 'inline_skip', None)
+            if n:
+                skip[(bank << 16) | (entry.start & 0xFFFF)] = n
+    return skip
+
+
 def _rebuild_callee_exit_mx(parsed, variants: dict) -> tuple:
     """Build the decoder's callee exit-(m, x) lookup from cfg state.
 
@@ -640,6 +655,10 @@ def _emit_bank_one(args_dict: dict) -> dict:
     set_force_variant_at(args_dict['force_variant_at'])
     set_valid_variants(args_dict.get('valid_variants') or {})
     set_trampoline_returns(args_dict['trampoline_returns'])
+    # Worker processes (spawn) don't inherit the main process's inline-skip
+    # global — re-apply it (mirrors set_rom_size etc.) so any decode inside
+    # emit_bank that isn't explicitly threaded still skips inline params.
+    set_global_inline_skip(args_dict.get('callee_inline_skip') or {})
     # Worker processes don't share the main process's module-level reloc
     # registry — re-apply it here (mirrors set_rom_size etc.). Covers both
     # the snes65816 byte-fetch helpers and codegen call-target validation.
@@ -680,6 +699,7 @@ def _emit_bank_one(args_dict: dict) -> dict:
                         exclude_ranges=cfg.exclude_ranges or None,
                         callee_exit_mx=args_dict['callee_exit_mx'],
                         callee_exit_mx_modes=args_dict['callee_exit_mx_modes'],
+                        callee_inline_skip=args_dict.get('callee_inline_skip'),
                         hle_spc_upload=getattr(
                             cfg, 'hle_spc_upload', None) or None,
                         hle_func=getattr(
@@ -861,6 +881,17 @@ def main() -> int:
             addr = nd.addr_24 & 0xFFFFFF
             name_map[addr] = nd.name
             cross_bank_names.setdefault((addr >> 16) & 0xFF, []).append(nd)
+
+    # JSR-inline-param skip map (cfg `inline_skip:N`). Install as the
+    # process-global so every in-process decode pass (variant discovery,
+    # exit-mx, modes) skips inline param bytes consistently. The parallel
+    # emit Pool workers don't inherit this (spawn), so the map is ALSO put
+    # into each work item and threaded to emit_bank explicitly below.
+    callee_inline_skip = _build_callee_inline_skip(parsed)
+    set_global_inline_skip(callee_inline_skip)
+    if callee_inline_skip:
+        print(f"  inline-param skip: {len(callee_inline_skip)} helper(s) "
+              f"{[hex(k) for k in sorted(callee_inline_skip)]}")
 
     # Build the GLOBAL code-reloc map from every cfg's `reloc` directives.
     # A reloc region (RAM-executed-from-ROM, e.g. Star Fox's irqcode at
@@ -1638,6 +1669,7 @@ def main() -> int:
                 'trampoline_returns': cumulative_trampoline_returns,
                 'callee_exit_mx': callee_exit_mx,
                 'callee_exit_mx_modes': callee_exit_mx_modes,
+                'callee_inline_skip': callee_inline_skip,
                 'reloc_regions': reloc_regions or None,
             })
 

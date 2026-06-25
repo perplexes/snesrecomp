@@ -396,6 +396,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 exit_mx: Optional[Tuple[int, int]] = None
                 entry_mx: Optional[Tuple[int, int]] = None
                 entry_s_offset_val: int = 0
+                inline_skip_val: Optional[int] = None
                 for t in tokens[3:]:
                     if t.startswith('end:'):
                         try:
@@ -454,6 +455,21 @@ def load_bank_cfg(path: str) -> BankCfg:
                             entry_s_offset_val = int(t[len('entry_s_offset:'):])
                         except ValueError:
                             pass
+                    elif t.startswith('inline_skip:'):
+                        # JSR-inline-param helper annotation. The callee at
+                        # this func's PC pulls its return address, reads N
+                        # bytes of inline params emitted right after the
+                        # `jsr`, then `adc #N; pha; rts` to return to
+                        # caller+N (e.g. SF's bg2chr/bg2scr/dopalette,
+                        # BGS.ASM:915/947/972). The decoder must skip N
+                        # inline bytes after any JSR/JSL to this target so
+                        # it does not decode the param bytes as garbage
+                        # instructions. v2_regen builds {target_pc24: N}
+                        # and threads it to the decoder as callee_inline_skip.
+                        try:
+                            inline_skip_val = int(t[len('inline_skip:'):])
+                        except ValueError:
+                            pass
                 be = BankEntry(
                     name=name, start=start, end=end,
                     tail_call_pc16=tail_call_pc16,
@@ -461,6 +477,8 @@ def load_bank_cfg(path: str) -> BankCfg:
                 # Non-default attribute on BankEntry; assign post-init.
                 if exit_mx is not None:
                     be.exit_mx = exit_mx
+                if inline_skip_val is not None:
+                    be.inline_skip = inline_skip_val
                 # Entry-mode seed. Explicit entry_mx: wins. Otherwise, strat
                 # functions (*_STRAT / *_ISTRAT) are reached via do_strat_l's
                 # runtime tjmp dispatch, which ALWAYS enters with m=1,x=0

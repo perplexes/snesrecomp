@@ -101,7 +101,8 @@ _MX_COMBOS: List[Tuple[int, int]] = [(0, 0), (0, 1), (1, 0), (1, 1)]
 def _decode_variant_exit(rom: bytes, bank: int, addr16: int,
                          em: int, ex: int, end,
                          callee_exit_mx,
-                         dispatch_helpers=None):
+                         dispatch_helpers=None,
+                         callee_inline_skip=None):
     """Decode (bank, addr16) with entry (em, ex) and the provided
     callee_exit_mx for any JSR/JSL fall-through. Returns (exit_m,
     exit_x) if the body decoded cleanly with an unambiguous exit
@@ -139,7 +140,8 @@ def _decode_variant_exit(rom: bytes, bank: int, addr16: int,
         graph = decode_function(rom, bank, addr16,
                                 entry_m=em, entry_x=ex, end=end,
                                 dispatch_helpers=dispatch_helpers,
-                                callee_exit_mx=callee_exit_mx)
+                                callee_exit_mx=callee_exit_mx,
+                                callee_inline_skip=callee_inline_skip)
     except Exception:
         return None
     if not graph.insns:
@@ -230,6 +232,18 @@ def detect_and_route(parsed, rom: bytes,
                 callee_exit_mx[key] = (m_val & 1, x_val & 1)
                 seeded_keys.add(key)
 
+    # JSR-inline-param skip map (target_pc24 -> N). Mirrors v2_regen's
+    # builder so this exit-mx analyzer decodes inline-param callers (e.g.
+    # bg_intro_1 -> bg2chr/bg2scr/dopalette) the SAME way the final emit
+    # does — otherwise the analyzer would decode the N param bytes as
+    # garbage instructions and could derive a bogus exit (m, x).
+    callee_inline_skip: dict = {}
+    for bank, _cfg_path, cfg in parsed:
+        for entry in cfg.entries:
+            n = getattr(entry, 'inline_skip', None)
+            if n:
+                callee_inline_skip[(bank << 16) | (entry.start & 0xFFFF)] = n
+
     # Iterative fixpoint with re-derivation. Each pass walks every
     # cfg entry × every (em, ex); decodes under the current
     # callee_exit_mx; updates the entry if the derived exit differs
@@ -252,7 +266,8 @@ def detect_and_route(parsed, rom: bytes,
                     exit_pair = _decode_variant_exit(
                         rom, bank, addr16, em, ex, entry.end,
                         callee_exit_mx,
-                        dispatch_helpers=dispatch_helpers)
+                        dispatch_helpers=dispatch_helpers,
+                        callee_inline_skip=callee_inline_skip)
                     if exit_pair is None:
                         # Body decoded but exit is ambiguous, or
                         # decode failed. Drop any prior record so

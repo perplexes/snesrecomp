@@ -777,7 +777,8 @@ def post_mx(insn: Insn, in_m: int, in_x: int) -> Tuple[int, int]:
 
 def _successors(insn: Insn, key: DecodeKey, bank: int,
                 callee_exit_mx: Optional[Dict] = None,
-                callee_exit_mx_modes: Optional[Dict] = None) -> List[DecodeKey]:
+                callee_exit_mx_modes: Optional[Dict] = None,
+                callee_inline_skip: Optional[Dict] = None) -> List[DecodeKey]:
     """Compute successor DecodeKeys for one decoded instruction.
 
     Returns plain DecodeKey list (kind-agnostic) for callers that only
@@ -787,13 +788,15 @@ def _successors(insn: Insn, key: DecodeKey, bank: int,
     return [k for (k, _kind) in
             _labeled_successors(insn, key, bank,
                                 callee_exit_mx=callee_exit_mx,
-                                callee_exit_mx_modes=callee_exit_mx_modes)]
+                                callee_exit_mx_modes=callee_exit_mx_modes,
+                                callee_inline_skip=callee_inline_skip)]
 
 
 def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
                         callee_exit_mx: Optional[Dict] = None,
                         callee_exit_mx_modes: Optional[Dict] = None,
-                        rom: Optional[bytes] = None):
+                        rom: Optional[bytes] = None,
+                        callee_inline_skip: Optional[Dict] = None):
     """Compute (DecodeKey, edge_kind) tuples for one decoded instruction.
 
     `edge_kind` is one of:
@@ -890,6 +893,26 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
             target_pc24 = addr24(bank, insn.operand & 0xFFFF)
         elif mnem == 'JSL':
             target_pc24 = insn.operand & 0xFFFFFF
+        # JSR-inline-param skip: if the callee at target_pc24 is a known
+        # inline-param helper (pulls its return addr, reads N inline bytes
+        # emitted after the jsr, then adc #N; pha; rts -> returns to
+        # caller+N), the real next instruction is N bytes PAST the normal
+        # fall-through. Skip those N param bytes so they are not decoded as
+        # garbage instructions. eff_next_pc is used for ALL fall-through
+        # successor keys below. (Runtime is already faithful: the pushed
+        # return frame + balanced pla/pha NLR-fast-returns to the host C
+        # caller, which resumes at this same eff_next_pc.)
+        eff_next_pc = next_pc
+        _skip_map = callee_inline_skip if callee_inline_skip is not None \
+            else _GLOBAL_INLINE_SKIP
+        if _skip_map and target_pc24 is not None:
+            _skip = _skip_map.get(target_pc24)
+            if _skip is None:
+                tbank = (target_pc24 >> 16) & 0xFF
+                if tbank < 0x40 or 0x80 <= tbank < 0xC0:
+                    _skip = _skip_map.get(target_pc24 ^ 0x800000)
+            if _skip:
+                eff_next_pc = (next_pc + _skip) & 0xFFFF
         if callee_exit_mx is not None:
             target_pc24: Optional[int] = None
             if mnem == 'JSR' and insn.length == 3:
@@ -924,9 +947,9 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
                 mode_set = None
             if mode_set and rom is not None:
                 try:
-                    next_off = addr_to_rom_offset(bank, next_pc)
+                    next_off = addr_to_rom_offset(bank, eff_next_pc)
                     next_ins = decode_insn(
-                        rom, next_off, next_pc, bank, m=post_m, x=post_x)
+                        rom, next_off, eff_next_pc, bank, m=post_m, x=post_x)
                 except Exception:
                     next_ins = None
                 if next_ins is None or next_ins.mnem not in _COND_BRANCHES:
@@ -939,11 +962,11 @@ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
                         continue
                     seen.add((em, ex))
                     succs.append(
-                        (DecodeKey(addr24(bank, next_pc), em, ex, post_p_stack),
+                        (DecodeKey(addr24(bank, eff_next_pc), em, ex, post_p_stack),
                          'fall'))
                 if succs:
                     return succs
-        return [(DecodeKey(addr24(bank, next_pc), ret_m, ret_x, post_p_stack), 'fall')]
+        return [(DecodeKey(addr24(bank, eff_next_pc), ret_m, ret_x, post_p_stack), 'fall')]
 
     # Default: linear fall-through with post-instruction mode.
     return [(DecodeKey(addr24(bank, next_pc), post_m, post_x, post_p_stack), 'fall')]
@@ -1068,6 +1091,22 @@ _DECODE_CACHE_HITS = 0
 _DECODE_CACHE_MISSES = 0
 _DECODE_CACHE_ENABLED = False  # off by default (cache key bug)
 
+# JSR-inline-param skip map (target_pc24 -> N), consulted by
+# _labeled_successors when no explicit callee_inline_skip is threaded to a
+# decode_function call. v2_regen sets this once (in the PARENT process)
+# before its in-process analysis passes (variant discovery, exit-mx,
+# modes) so they decode inline-param callers consistently with the final
+# emit. The parallel emit Pool workers (spawn) do NOT inherit this global,
+# so emit_bank is ALSO threaded the map explicitly via the work-item dict.
+_GLOBAL_INLINE_SKIP: Dict[int, int] = {}
+
+
+def set_global_inline_skip(m: Optional[Dict[int, int]]) -> None:
+    """Install the process-global JSR-inline-param skip map. Idempotent;
+    set once before decoding. See `_GLOBAL_INLINE_SKIP`."""
+    global _GLOBAL_INLINE_SKIP
+    _GLOBAL_INLINE_SKIP = dict(m) if m else {}
+
 
 def set_decode_cache_enabled(enabled: bool) -> None:
     """Enable/disable decode_function memoization. Disabling clears."""
@@ -1134,6 +1173,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                     callee_exit_mx_modes: Optional[Dict] = None,
                     sibling_entry_pcs: Optional[set] = None,
                     reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
+                    callee_inline_skip: Optional[Dict] = None,
                     ) -> "FunctionDecodeGraph":
     """Public cached wrapper around `_decode_function_uncached`.
 
@@ -1154,6 +1194,7 @@ def decode_function(rom: bytes, bank: int, start: int,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_entry_pcs,
             reloc_regions=reloc_regions,
+            callee_inline_skip=callee_inline_skip,
         )
 
     cache_key = (
@@ -1165,6 +1206,7 @@ def decode_function(rom: bytes, bank: int, start: int,
         id(data_regions) if data_regions is not None else 0,
         id(callee_exit_mx) if callee_exit_mx is not None else 0,
         id(callee_exit_mx_modes) if callee_exit_mx_modes is not None else 0,
+        id(callee_inline_skip) if callee_inline_skip is not None else 0,
         id(sibling_entry_pcs) if sibling_entry_pcs is not None else 0,
         # reloc_regions changes which bytes back an address — a stale cache
         # hit must not mix relocated and non-relocated decodes of the same
@@ -1193,6 +1235,7 @@ def decode_function(rom: bytes, bank: int, start: int,
         callee_exit_mx_modes=callee_exit_mx_modes,
         sibling_entry_pcs=sibling_entry_pcs,
         reloc_regions=reloc_regions,
+        callee_inline_skip=callee_inline_skip,
     )
     _DECODE_CACHE[cache_key] = graph
     return graph
@@ -1211,6 +1254,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     callee_exit_mx_modes: Optional[Dict] = None,
                     sibling_entry_pcs: Optional[set] = None,
                     reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
+                    callee_inline_skip: Optional[Dict] = None,
                     ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
@@ -1725,6 +1769,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                         insn, key, bank,
                         callee_exit_mx=callee_exit_mx,
                         callee_exit_mx_modes=callee_exit_mx_modes,
+                        callee_inline_skip=callee_inline_skip,
                         rom=rom)
                     site_m = insn.m_flag & 1
                     site_x = insn.x_flag & 1
@@ -1781,6 +1826,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     insn, key, bank,
                     callee_exit_mx=callee_exit_mx,
                     callee_exit_mx_modes=callee_exit_mx_modes,
+                    callee_inline_skip=callee_inline_skip,
                     rom=rom)
                 # Append jump-kind edges to the in-bank handlers. Each
                 # dispatch target enters as its own function — empty
@@ -1817,6 +1863,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
             insn, key, bank,
             callee_exit_mx=callee_exit_mx,
             callee_exit_mx_modes=callee_exit_mx_modes,
+            callee_inline_skip=callee_inline_skip,
             rom=rom)
         succ = [k for (k, _) in labeled_succ]
         graph.insns[key] = DecodedInsn(key=key, insn=insn, successors=succ)
