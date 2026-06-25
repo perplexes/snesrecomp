@@ -34,6 +34,7 @@ from v2.decoder import (  # noqa: E402
 from v2.cfg import V2Block, V2CFG, build_cfg  # noqa: E402
 from v2.lowering import lower  # noqa: E402
 from v2.codegen import emit_op  # noqa: E402
+from v2.cycle_tables import estimate_block_cycles  # noqa: E402
 from v2.ir import (  # noqa: E402
     IROp, IRBlock, Value,
     CondBranch, Goto, IndirectGoto, Call, Return,
@@ -1681,6 +1682,12 @@ def emit_function(rom: bytes, bank: int, start: int,
         # Cheap (counter bump + branch); v1 emitted at loop headers, v2
         # gets it at every block since we don't yet identify back-edges.
         src.append(f'    WatchdogCheck();')
+        # Cycle-faithful clock: advance the master-cycle counter by this block's
+        # estimated 65C816 cost so the scheduler fires NMI/IRQ at the right
+        # simulated beam position (proportional estimate; see cycle_tables.py).
+        _blk_cyc = estimate_block_cycles(cfg.blocks[key].insns)
+        if _blk_cyc:
+            src.append(f'    cpu_cycle_tick(cpu, {_blk_cyc});')
         for ln in block_lines[key]:
             # Inject RecompStackPop before any return so the stack stays balanced.
             stripped = ln.strip()

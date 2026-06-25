@@ -28,6 +28,16 @@ typedef void RunOneFrameOfGameFunc(void);
 void WatchdogCheck(void);
 void WatchdogFrameStart(void);
 
+/* Cycle-faithful clock: the recompiler emits cpu_cycle_tick(cpu, N) per block
+ * with N = the block's estimated 65C816 master-cycle cost. We accumulate into
+ * g_pending_cycles and WatchdogCheck() flushes the real total into sched_tick()
+ * so NMI/V-IRQ/H-IRQ fire at the architecturally correct simulated beam
+ * position — instead of a fixed heuristic cost per block tick. The `cpu` arg is
+ * unused today (kept for ABI symmetry / future per-CPU clocks). */
+struct CpuState;
+extern uint64_t g_pending_cycles;
+void cpu_cycle_tick(struct CpuState *cpu, uint32_t n);
+
 /* Cooperative IRQ pump hook (game-agnostic). Some games spin-wait on RAM
  * flags that ONLY advance inside an interrupt handler (e.g. a vblank/raster
  * IRQ that DMAs a framebuffer and bumps a double-buffer flag). With no async

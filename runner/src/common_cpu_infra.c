@@ -108,6 +108,20 @@ int cpu_resolve_ancestor_skip(uint16_t ret_s) {
   for (int i = top - 2; i >= 0; i--) {
     if (g_cpu_entry_s[i] == ret_s) { _found = (top - 1) - i; break; }
   }
+  /* skip==1 guard (2026-06-25, codex gpt-5.5 + opus advisor convergence): a
+   * resolution to the IMMEDIATE C-parent (top-2, _found==1) is ALWAYS wrong.
+   * A direct parent resumes correctly via the normal dispatch-miss fallback
+   * (cpu_dispatch_pc_from restores S=entry_s+frame_sz and returns NORMAL, so
+   * the parent's call-site continues at its natural continuation) — it never
+   * needs to be *abandoned* via SKIP. Genuine multi-level non-local returns
+   * (the fish-explosion OAM-wipe the mechanism exists for) are always skip>=2.
+   * Without this, a guest-S drift injected upstream (e.g. a strat coroutine
+   * ancestor-skip leaving S off by one return frame) makes a plain jsl/rtl
+   * mis-resolve as SKIP_1, and the caller's `return (_r-1)` ABANDONS its own
+   * frame instead of resuming — which is why the boot front-end runs intro_l
+   * then returns out of I_RESET, skipping titleseq/briefing/planetseq.
+   * Forcing -1 here routes skip==1 to the (correct) dispatch fallback. */
+  if (_found == 1) _found = -1;
   /* SF_TRACE_BOOT: dump the recomp call stack when an ancestor-skip is resolved
    * during boot — to see if the frame-boundary unwind overshoots gameloop2 to
    * the I_RESET root. Ungated; one-line per resolution, capped. */
@@ -269,6 +283,15 @@ GsuFrameDoneFunc g_gsu_frame_done; /* game-registered GSU/coproc frame presenter
 DmaSuppressFunc g_dma_suppress;    /* game-registered MDMAEN channel suppressor */
 int g_in_coop_pump;               /* reentrancy guard (pump runs recompiled code) */
 
+/* Cycle-faithful clock accumulator. The recompiler emits cpu_cycle_tick(cpu, N)
+ * per block; we sum here and WatchdogCheck() flushes the real total into
+ * sched_tick() (replacing the old fixed-cost heuristic). */
+uint64_t g_pending_cycles = 0;
+void cpu_cycle_tick(struct CpuState *cpu, uint32_t n) {
+  (void)cpu;
+  g_pending_cycles += n;
+}
+
 void WatchdogFrameStart(void) {
   g_frame_start_clock = clock();
   g_watchdog_enabled = 1;
@@ -374,7 +397,16 @@ void WatchdogCheck(void) {
      * This fixes the early-boot deadlock: previously the scheduler refused to
      * tick until vIrqEnabled, so a spin before V-IRQ enable advanced nothing. */
     int pre_frame = snes_frame_counter;
-    sched_tick(SCHED_BLOCK_COST);
+    /* Cycle-faithful clock: advance by the REAL cycles the recompiled blocks
+     * reported since the last tick (cpu_cycle_tick accumulation), not a fixed
+     * heuristic cost. This makes the simulated beam track actual work, so V-IRQ
+     * lands when the game expects it and spin-waits resolve every frame. Fall
+     * back to SCHED_BLOCK_COST if no blocks reported (e.g. pure HLE stretch) so
+     * the clock never stalls. */
+    uint32_t cyc = (uint32_t)g_pending_cycles;
+    g_pending_cycles = 0;
+    if (cyc == 0) cyc = SCHED_BLOCK_COST;
+    sched_tick(cyc);
     if (snes_frame_counter != pre_frame) {
       g_frame_start_clock = clock();
     }
