@@ -339,16 +339,28 @@ void WatchdogCheck(void) {
    * the outer sched_tick can detect the crossing. The IRQ handler runs at
    * simulated cycle-time 207 and should not advance the clock further; all
    * cycle advancement happens in the outer (non-pump) WatchdogCheck calls. */
-  if (g_sched_enabled && g_snes && g_snes->vIrqEnabled && !g_in_coop_pump) {
+  if (g_sched_enabled && g_snes && !g_in_coop_pump) {
+    /* FREE-RUNNING CLOCK (Phase 2 switchover): advance the cycle/scanline clock
+     * on EVERY block tick, regardless of vIrqEnabled. sched_tick() gates IRQ
+     * *delivery* internally on vIrqEnabled, so no V-IRQ fires until the game
+     * enables it -- but the clock, the VBlank edge (snes_frame_counter +
+     * g_sched_frame_hook present), and the hang watchdog all run from cold boot.
+     * This fixes the early-boot deadlock: previously the scheduler refused to
+     * tick until vIrqEnabled, so a spin before V-IRQ enable advanced nothing. */
     int pre_frame = snes_frame_counter;
     sched_tick(SCHED_BLOCK_COST);
-    /* Reset the hang timer whenever snes_frame_counter advances (the
-     * scheduler crossed a VBlank and the game is making forward progress).
-     * Without this reset, the 5s watchdog trips even on healthy scheduler
-     * runs because g_frame_start_clock is only reset inside the old pump
-     * path (which the scheduler bypasses). */
     if (snes_frame_counter != pre_frame) {
       g_frame_start_clock = clock();
+    }
+    /* Before the game enables V-IRQ, sched_tick cannot deliver IRQ, so keep the
+     * cooperative pump driving the IRQ-set spin-wait flags (boot APU upload /
+     * transfer double-buffer). Once vIrqEnabled flips true, sched_tick delivers
+     * the real V-IRQ and this redundant pump stops -- a clean handoff. */
+    if (!g_snes->vIrqEnabled && g_coop_irq_pump) {
+      g_in_coop_pump = 1;
+      int progressed = g_coop_irq_pump();
+      g_in_coop_pump = 0;
+      if (progressed) g_frame_start_clock = clock();
     }
     /* Fall through to the hang check -- the scheduler path still needs the
      * 5-second watchdog to fire on genuine hangs. */

@@ -79,6 +79,7 @@
 
 int           g_sched_enabled     = 0;
 SchedNmiFunc  g_sched_nmi_handler = NULL;
+SchedFrameFunc g_sched_frame_hook = NULL;
 uint32_t      g_sched_block_cost  = SCHED_BLOCK_COST_DEFAULT;
 
 /* -- Internal state -------------------------------------------------------- */
@@ -171,6 +172,17 @@ void sched_tick(uint32_t block_cost) {
 
             if (g_snes) {
                 g_snes->inVblank = true;
+            }
+
+            /* Per-frame present hook: fire once per VBlank edge REGARDLESS of
+             * nmiEnabled (Star Fox is V-IRQ only). This drives host frame
+             * presentation while the real game loop runs to never-return inside
+             * I_RESET. Guarded by g_in_coop_pump (held here) so a re-entrant
+             * tick cannot double-fire; the hook must not run recompiled CPU. */
+            if (g_sched_frame_hook) {
+                g_in_coop_pump = 1;
+                g_sched_frame_hook();
+                g_in_coop_pump = 0;
             }
 
             /* If NMI is enabled, also signal the NMI hardware flag and

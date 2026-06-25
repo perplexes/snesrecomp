@@ -110,6 +110,18 @@ extern int g_sched_enabled;
 typedef void (*SchedNmiFunc)(void);
 extern SchedNmiFunc g_sched_nmi_handler;
 
+/*
+ * Per-frame present hook -- fired on EVERY VBlank edge regardless of nmiEnabled
+ * (Star Fox uses V-IRQ only and never enables NMI, so the nmi handler path
+ * above does not fire for it). The game registers this to present one frame to
+ * the host per simulated frame while the real game loop runs to never-return
+ * inside I_RESET. It MUST be "boring": no recompiled CPU re-entry, no game-RAM
+ * mutation (debug instrumentation aside), no interrupt delivery. It may block
+ * for frame pacing (SDL_Delay). Reentrancy-guarded by the caller.
+ */
+typedef void (*SchedFrameFunc)(void);
+extern SchedFrameFunc g_sched_frame_hook;
+
 /* Reset the per-frame cycle/scanline accumulators. Call once at the start of
  * each host frame (before WatchdogFrameStart or alongside it). */
 void sched_frame_start(void);
