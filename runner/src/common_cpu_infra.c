@@ -303,7 +303,13 @@ void WatchdogFrameStart(void) {
   static int s_sched_init = 0;
   if (!s_sched_init) {
     s_sched_init = 1;
-    g_sched_enabled = (getenv("SF_SCHED") && getenv("SF_SCHED")[0] == '1');
+    /* Env overrides the game-set default (a game enables the scheduler by
+     * setting g_sched_enabled=1 before reset; SF does, SMW leaves it 0 for
+     * its flipbook path). SF_NO_SCHED forces off; SF_SCHED=0/1 forces. */
+    if (getenv("SF_NO_SCHED"))
+      g_sched_enabled = 0;
+    else if (getenv("SF_SCHED"))
+      g_sched_enabled = (getenv("SF_SCHED")[0] == '1');
     /* Allow runtime override of block cost for calibration.
      * SF_SCHED_BLOCK_COST=N sets N cycles per WatchdogCheck tick. */
     if (g_sched_enabled) {
