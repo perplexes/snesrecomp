@@ -486,6 +486,25 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
         }
     }
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
+    /* SF_TRACE_BOOT: temporary boot-flow probe — log the first N cross-function
+     * dispatches (target, source, hit, mx) to see exactly where the real boot
+     * sequence stops/unwinds. Ungated (cpu_state.c is always compiled). */
+    {
+        static int s_tb = -1;
+        static int s_tb_n = 0;
+        static int s_tb_max = 0;
+        if (s_tb < 0) {
+            const char *e = getenv("SF_TRACE_BOOT");
+            s_tb = e ? 1 : 0;
+            s_tb_max = e ? (int)strtol(e, NULL, 10) : 0;
+            if (s_tb_max <= 0) s_tb_max = 250;
+        }
+        if (s_tb && s_tb_n < s_tb_max) {
+            s_tb_n++;
+            fprintf(stderr, "[boot] #%d pc=$%06X mx=%u found=%d mirror=%d from=$%06X\n",
+                    s_tb_n, pc24, mx_idx, fp != NULL, via_mirror, source_pc24);
+        }
+    }
     /* SF_DUMP_MISSES: accumulate the unique set of dispatch MISSES (target,
      * source, mx) and dump them to the named file at exit. Drives the
      * coroutine-resume enumeration: a manufactured-RTL dispatcher (do_strat,

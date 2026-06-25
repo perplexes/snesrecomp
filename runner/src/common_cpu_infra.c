@@ -104,10 +104,26 @@ int cpu_resolve_ancestor_skip(uint16_t ret_s) {
    * in behavior). */
   int top = g_recomp_stack_top;
   if (top < 2 || top > RECOMP_STACK_DEPTH) return -1;
+  int _found = -1;
   for (int i = top - 2; i >= 0; i--) {
-    if (g_cpu_entry_s[i] == ret_s) return (top - 1) - i;
+    if (g_cpu_entry_s[i] == ret_s) { _found = (top - 1) - i; break; }
   }
-  return -1;
+  /* SF_TRACE_BOOT: dump the recomp call stack when an ancestor-skip is resolved
+   * during boot — to see if the frame-boundary unwind overshoots gameloop2 to
+   * the I_RESET root. Ungated; one-line per resolution, capped. */
+  {
+    static int s_tb = -1, s_n = 0;
+    if (s_tb < 0) s_tb = getenv("SF_TRACE_BOOT") ? 1 : 0;
+    if (s_tb && s_n < 30) {
+      s_n++;
+      fprintf(stderr, "[anc] ret_s=%04x top=%d skip=%d stack=[", ret_s, top, _found);
+      for (int i = 0; i < top && i < RECOMP_STACK_DEPTH; i++)
+        fprintf(stderr, "%s%s(s=%04x)", i ? "," : "",
+                g_recomp_stack[i] ? g_recomp_stack[i] : "?", g_cpu_entry_s[i]);
+      fprintf(stderr, "]\n");
+    }
+  }
+  return _found;
 }
 
 // Function-boundary WRAM snapshot history (Phase B koopa-stomp).
@@ -151,6 +167,16 @@ void RecompStackPush(const char *name) {
     g_recomp_stack[g_recomp_stack_top++] = name;
   g_last_recomp_func = name;
   debug_server_profile_push(name);
+  /* SF_TRACE_BOOT: depth-limited top-level call trace — see the front-end boot
+   * sequence (intro/title/briefing/planetseq/gameloop) without strat noise. */
+  {
+    static int s_tbp = -1, s_tbp_n = 0;
+    if (s_tbp < 0) s_tbp = getenv("SF_TRACE_BOOT") ? 1 : 0;
+    if (s_tbp && s_tbp_n < 400 && g_recomp_stack_top <= 5 && name) {
+      s_tbp_n++;
+      fprintf(stderr, "[call d%d] %s\n", g_recomp_stack_top, name);
+    }
+  }
   /* SF_TRACE_STRAT: log entries to the player-setup / strat-dispatch path
    * (always-on; this push fires for every recompiled func). Matches both
    * symbol-named and address-named (bank_BB_AAAA) forms. */

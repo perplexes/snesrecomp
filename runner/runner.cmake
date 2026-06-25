@@ -55,8 +55,13 @@ option(SNESRECOMP_ENABLE_TRACE "Build the TCP debug server / observability rings
 if(SNESRECOMP_ENABLE_TRACE)
     list(APPEND SNESRECOMP_RUNNER_SOURCES
         ${SNESRECOMP_RUNNER_ROOT}/src/debug_server.c
-        ${SNESRECOMP_RUNNER_ROOT}/src/emu_oracle_cmds.c
     )
+    # emu_oracle_cmds.c was removed in b1195e2 (in-process snes9x oracle replaced
+    # by the standalone snes-oracle tool); only compile it if it still exists.
+    if(EXISTS ${SNESRECOMP_RUNNER_ROOT}/src/emu_oracle_cmds.c)
+        list(APPEND SNESRECOMP_RUNNER_SOURCES
+            ${SNESRECOMP_RUNNER_ROOT}/src/emu_oracle_cmds.c)
+    endif()
 endif()
 
 set(SNESRECOMP_RUNNER_INCLUDE_DIRS
