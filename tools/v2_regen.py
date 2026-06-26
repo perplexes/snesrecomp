@@ -706,7 +706,9 @@ def _emit_bank_one(args_dict: dict) -> dict:
                             cfg, 'hle_func', None) or None,
                         hle_dispatch=getattr(
                             cfg, 'hle_dispatch', None) or None,
-                        reloc_regions=args_dict.get('reloc_regions') or None)
+                        reloc_regions=args_dict.get('reloc_regions') or None,
+                        inline_dispatch_loop_pcs=args_dict.get(
+                            'inline_dispatch_loop_pcs') or None)
     except Exception as e:
         return {
             'bank': bank,
@@ -1656,6 +1658,11 @@ def main() -> int:
                 for d in ind_list:
                     pc24 = (bank << 16) | (d['site_pc16'] & 0xFFFF)
                     ind_dispatch_map[pc24] = d
+            # SF_REAL_LOOP M0/M1: per-bank set of 16-bit dispatch-site PCs
+            # marked `inline_dispatch_loop` — threaded to the decoder so the
+            # site's handlers import as local blocks + codegen emits goto.
+            inline_dispatch_loop_pcs = set(
+                getattr(cfg, 'inline_dispatch_loops', None) or ()) or None
             work_items.append({
                 'bank': bank,
                 'cfg': cfg,
@@ -1663,6 +1670,7 @@ def main() -> int:
                 'rom_size': len(rom),
                 'dispatch_helpers': dispatch_helpers,
                 'indirect_dispatch_map': ind_dispatch_map,
+                'inline_dispatch_loop_pcs': inline_dispatch_loop_pcs,
                 'name_map': name_map,
                 'force_variant_at': force_variant_map,
                 'valid_variants': valid_variants_map,

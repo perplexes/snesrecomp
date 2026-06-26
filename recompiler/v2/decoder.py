@@ -1238,6 +1238,7 @@ def decode_function(rom: bytes, bank: int, start: int,
                     sibling_entry_pcs: Optional[set] = None,
                     reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
                     callee_inline_skip: Optional[Dict] = None,
+                    inline_dispatch_loop_pcs: Optional[set] = None,
                     ) -> "FunctionDecodeGraph":
     """Public cached wrapper around `_decode_function_uncached`.
 
@@ -1259,6 +1260,7 @@ def decode_function(rom: bytes, bank: int, start: int,
             sibling_entry_pcs=sibling_entry_pcs,
             reloc_regions=reloc_regions,
             callee_inline_skip=callee_inline_skip,
+            inline_dispatch_loop_pcs=inline_dispatch_loop_pcs,
         )
 
     # Dependency-keyed memo. The original `id()`-based key was the cache bug:
@@ -1290,6 +1292,7 @@ def decode_function(rom: bytes, bank: int, start: int,
         _env_token(callee_exit_mx_modes),
         _env_token(callee_inline_skip),
         _env_token(sibling_entry_pcs),
+        _env_token(inline_dispatch_loop_pcs),
         _freeze(reloc_regions) if reloc_regions else 0,
         _freeze(_GLOBAL_INLINE_SKIP) if _GLOBAL_INLINE_SKIP else 0,
         _freeze(snes65816._ACTIVE_RELOC_REGIONS)
@@ -1319,6 +1322,7 @@ def decode_function(rom: bytes, bank: int, start: int,
             sibling_entry_pcs=sibling_entry_pcs,
             reloc_regions=reloc_regions,
             callee_inline_skip=callee_inline_skip,
+            inline_dispatch_loop_pcs=inline_dispatch_loop_pcs,
         )
         deps = ()
     else:
@@ -1336,6 +1340,7 @@ def decode_function(rom: bytes, bank: int, start: int,
             sibling_entry_pcs=sibling_entry_pcs,
             reloc_regions=reloc_regions,
             callee_inline_skip=callee_inline_skip,
+            inline_dispatch_loop_pcs=inline_dispatch_loop_pcs,
         )
         deps = reader.deps()
     if bucket is None:
@@ -1359,6 +1364,7 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                     sibling_entry_pcs: Optional[set] = None,
                     reloc_regions: Optional[List[Tuple[int, int, int, int, int]]] = None,
                     callee_inline_skip: Optional[Dict] = None,
+                    inline_dispatch_loop_pcs: Optional[set] = None,
                     ) -> FunctionDecodeGraph:
     """Decode a function starting at (bank, start) with entry (m, x) state.
 
@@ -1409,6 +1415,19 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
     entry_key = DecodeKey(addr24(bank, start), entry_m, entry_x)
     graph = FunctionDecodeGraph(entry=entry_key)
 
+    # SF_REAL_LOOP M0/M1 inline-dispatch-loop territory (16-bit PCs). Seeded
+    # with the marked dispatch site(s) when their dispatch insn is resolved
+    # below; then any jump target whose PREDECESSOR is already in this set is
+    # imported as a LOCAL block of THIS function even if it is a named sibling
+    # entry (the normal sibling-refusal at the gate below). This grows the
+    # territory transitively across the static-dispatch loop SCC (handlers,
+    # the loop-head, the back-edges), so the whole per-frame command walk
+    # emits as one C function of local gotos. Bounded by max_insns; #31
+    # verified the SF map SCC is closed (zero cross-bank jmp, no handler
+    # sharing). Empty/None unless a cfg `inline_dispatch_loop` marks a site.
+    _inline_loop_sites = {p & 0xFFFF for p in (inline_dispatch_loop_pcs or ())}
+    inline_pcs: Set[int] = set()
+
     # Worklist holds (key, edge_kind, pred_pc). edge_kind is
     # 'entry' for the initial seed, 'jump' for BRA/BRL/JMP-ABS/cond-
     # branch-target, 'fall' for linear next-PC after non-control or
@@ -1434,6 +1453,18 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
             continue
 
         pc = key.pc & 0xFFFF
+        # SF_REAL_LOOP M0/M1: propagate inline-dispatch-loop territory through
+        # EVERY edge (fall + jump). If the predecessor block is inline
+        # territory, this block is too — record its PC so (a) a `jmp` back to
+        # the loop-head from THIS block imports the head's block locally even
+        # at a different (m, x) variant, and (b) the territory keeps growing
+        # across the loop SCC (handlers + their internal fall/branch blocks +
+        # the loop-head + the dispatch). Seeded with the marked dispatch site
+        # PC when its insn resolves (below). Bounded by max_insns; the SF map
+        # SCC is closed (#31). pred_pc == -1 for the entry seed (not territory).
+        _pred_in_territory = pred_pc >= 0 and (pred_pc & 0xFFFF) in inline_pcs
+        if _pred_in_territory:
+            inline_pcs.add(pc)
         # Boundary-crossing fall-through: predecessor was inside the
         # nominal range, and this fall-through would land past end: in
         # the next function's body. Reject — that's exactly what end:
@@ -1468,9 +1499,17 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
         # own start, so back-edges to entry are unaffected. The PHB/
         # PLB-balanced cross-fn-jump case is unaffected — those targets
         # aren't in `sibling_entry_pcs`.
+        # SF_REAL_LOOP M0/M1: a jump edge into the inline-dispatch-loop
+        # territory is IMPORTED as a local block even though the target is a
+        # named sibling entry. The predecessor is already inline territory
+        # (the marked dispatch site or a previously-reached loop block), so
+        # this target is part of the static-dispatch loop SCC — pulling it
+        # local is the whole point (handlers + loop-head + back-edges become
+        # local gotos in one C frame, no nested calls / no SKIP_N overshoot).
         if (sibling_entry_pcs is not None
                 and edge_kind == 'jump'
-                and pc in sibling_entry_pcs):
+                and pc in sibling_entry_pcs
+                and not _pred_in_territory):
             continue
         # Address-range gate. Normally a local PC must be in LoROM code
         # space ($8000-$FFFF); anything else is an out-of-bank/RAM ref we
@@ -1728,6 +1767,15 @@ def _decode_function_uncached(rom: bytes, bank: int, start: int,
                                           else 'short')
                     insn.dispatch_idx_reg = auth['idx_reg']
                     insn.dispatch_table_bases = tuple(auth.get('table_bases', ()) or ())
+                    # SF_REAL_LOOP M0/M1: if a cfg `inline_dispatch_loop`
+                    # marks THIS dispatch site, stamp the insn so codegen
+                    # emits goto-to-local-labels instead of nested handler
+                    # calls, and seed the inline territory with the site PC so
+                    # the handler targets (added as 'jump' successors below,
+                    # pred_pc = this site) import as local blocks.
+                    if (pc & 0xFFFF) in _inline_loop_sites:
+                        insn.inline_dispatch_loop = True
+                        inline_pcs.add(pc & 0xFFFF)
                     # Register each in-bank target as a decode successor
                     # so reach-analysis + auto-promote pick up the handlers.
                     extra_succs = []

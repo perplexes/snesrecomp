@@ -140,7 +140,8 @@ class Insn:
     __slots__ = ('addr', 'opcode', 'mnem', 'mode', 'operand', 'length',
                  'dispatch_entries', 'dispatch_kind', 'dispatch_idx_reg',
                  'dispatch_table_bases', 'm_flag', 'x_flag', 'dispatch_terminal',
-                 'const_z_fold_unconditional', 'const_z_fold_dead_pc24')
+                 'const_z_fold_unconditional', 'const_z_fold_dead_pc24',
+                 'inline_dispatch_loop')
 
     def __init__(self, addr, opcode, mnem, mode, operand, length):
         self.addr = addr
@@ -169,6 +170,10 @@ class Insn:
         # build report.
         self.const_z_fold_unconditional = False
         self.const_z_fold_dead_pc24 = None
+        # SF_REAL_LOOP M0/M1: set True by the decoder when a cfg
+        # `inline_dispatch_loop` marks this indirect-dispatch site, so
+        # codegen emits goto-to-local-handler instead of nested calls.
+        self.inline_dispatch_loop = False
 
     def __repr__(self):
         bank = (self.addr >> 16) & 0xFF

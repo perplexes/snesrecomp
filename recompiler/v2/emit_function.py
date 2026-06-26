@@ -405,6 +405,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                   hle_func=None,
                   hle_dispatch=None,
                   reloc_regions=None,
+                  inline_dispatch_loop_pcs: Optional[set] = None,
                   entry_s_offset: int = 0) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
@@ -482,7 +483,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                             callee_exit_mx_modes=callee_exit_mx_modes,
                             callee_inline_skip=callee_inline_skip,
                             sibling_entry_pcs=sibling_entry_pcs,
-                            reloc_regions=reloc_regions)
+                            reloc_regions=reloc_regions,
+                            inline_dispatch_loop_pcs=inline_dispatch_loop_pcs)
     # Forward any suppressed indirect calls upward so emit_bank can
     # aggregate them into the build report. List-of-records.
     if suppressed_collector is not None:
@@ -1483,7 +1485,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                     insn = di_insn
                     if getattr(insn, 'dispatch_entries', None):
                         from v2.codegen import _emit_indirect_dispatch
-                        for ln in _emit_indirect_dispatch(insn):
+                        for ln in _emit_indirect_dispatch(insn, local_labels=local_labels):
                             lines.append(ln)
                         block_terminated = True
                     else:
@@ -1521,7 +1523,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                     # push, otherwise the synthesized return address
                     # leaks onto the simulated SNES stack.
                     from v2.codegen import _emit_indirect_dispatch
-                    for ln in _emit_indirect_dispatch(di_insn):
+                    for ln in _emit_indirect_dispatch(di_insn, local_labels=local_labels):
                         lines.append(ln)
                     block_terminated = True
                 elif isinstance(op, Call):
@@ -1539,7 +1541,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                     if getattr(insn, 'dispatch_entries', None):
                         if getattr(insn, 'dispatch_idx_reg', None) in ('X', 'Y'):
                             from v2.codegen import _emit_indirect_dispatch
-                            for ln in _emit_indirect_dispatch(insn):
+                            for ln in _emit_indirect_dispatch(insn, local_labels=local_labels):
                                 lines.append(ln)
                             if getattr(insn, 'mnem', '') != 'JSR':
                                 block_terminated = True

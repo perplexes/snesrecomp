@@ -114,6 +114,20 @@ class BankCfg:
     # entry as a decode successor (for auto-promote / reachability), and
     # stamps `insn.dispatch_entries` so codegen emits a real switch.
     indirect_dispatch: List[dict] = field(default_factory=list)
+    # `inline_dispatch_loop <site_pc16>` directives (SF_REAL_LOOP M0/M1) —
+    # set of 16-bit PCs of indirect-dispatch sites (a `jmp (table,X)` already
+    # authorised by an `indirect_dispatch` directive) that are the head of a
+    # STATIC-DISPATCH LOOP whose handlers all `jmp` back to the dispatch's
+    # enclosing function. When marked, the decoder imports the dispatch's
+    # resolved targets as LOCAL BLOCKS of the enclosing function (instead of
+    # letting auto-promote split them into separately-called sibling
+    # functions), and codegen emits the dispatch as `switch ... goto Lhandler`
+    # to those local labels. The per-frame command walk then runs in ONE C
+    # frame with a balanced guest/host stack — modelling the hardware's flat
+    # `jmp`-loop (Star Fox's newobjs_l map-script interpreter, $03:E19E).
+    # Opt-in: absent the directive, the site emits byte-identically (nested
+    # calls). See docs/SF_REAL_LOOP_DESIGN.md.
+    inline_dispatch_loops: set = field(default_factory=set)
     # `hle_spc_upload <pc>` directives — replace the recompiled body of
     # the function starting at <pc> with a single call to the runtime
     # HLE helper RtlUploadSpcImageFromDp. The standard SNES SPC upload
@@ -382,6 +396,25 @@ def load_bank_cfg(path: str) -> BankCfg:
                     'idx_reg': idx_reg,
                     'table_bases': table_bases,
                 })
+                continue
+
+            # inline_dispatch_loop <site_pc16>  (SF_REAL_LOOP M0/M1)
+            # Mark an already-`indirect_dispatch`-authorised site as a
+            # static-dispatch LOOP head: import its handlers as local blocks
+            # of the enclosing function + emit goto-dispatch. See
+            # BankCfg.inline_dispatch_loops.
+            if head == 'inline_dispatch_loop':
+                if len(tokens) < 2:
+                    raise ValueError(
+                        f"{path}: inline_dispatch_loop needs <site_pc16> — "
+                        f"got: {stripped!r}")
+                try:
+                    site_pc16 = _parse_hex(tokens[1]) & 0xFFFF
+                except ValueError as e:
+                    raise ValueError(
+                        f"{path}: inline_dispatch_loop bad site_pc "
+                        f"{tokens[1]!r}: {e}")
+                cfg.inline_dispatch_loops.add(site_pc16)
                 continue
 
             # func <name> <hex_pc> [end:<hex_end>] [tail_call:<hex>] [exit_mx:M,X]

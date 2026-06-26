@@ -1209,12 +1209,21 @@ def _emit_indirect_goto(op: IndirectGoto) -> List[str]:
     return [f"/* IndirectGoto: target = ({bank}, {addr}) — caller dispatches */"]
 
 
-def _emit_indirect_dispatch(insn) -> List[str]:
+def _emit_indirect_dispatch(insn, local_labels=None) -> List[str]:
     """Emit a real switch for an indirect JMP/JML/JSR whose static
     target list the decoder recovered (via cfg `indirect_dispatch` or
     auto-recovery). Switches on the index register declared by the
     cfg directive (X or Y); each case tail-calls the corresponding
     handler.
+
+    SF_REAL_LOOP M0/M1: when the decoder stamped `insn.inline_dispatch_loop`
+    (a cfg `inline_dispatch_loop` site), each case emits `goto L_<tgt>` to a
+    LOCAL handler block instead of a nested variant-dispatch call — the
+    handlers were imported into THIS function's CFG, so the per-frame command
+    walk runs in one C frame with a balanced stack (no SKIP_N overshoot).
+    `local_labels` is the set of label names that exist in the enclosing
+    function; a target whose local label is absent falls back to the nested
+    call (robust against an un-imported handler).
 
     The dispatching JMP/JML is a TERMINATOR (control transfers to the
     handler; the handler's own RTL/RTS returns to the dispatcher's
@@ -1411,6 +1420,16 @@ def _emit_indirect_dispatch(insn) -> List[str]:
         lines.append(
             f"    return cpu_trace_dispatch_oob(cpu, 0x{site_pc24:06x}, _idx);")
     lines.append("  }")
+    # SF_REAL_LOOP M0/M1: goto-mode for a marked inline_dispatch_loop site.
+    # Each in-bank handler was imported as a local block; dispatch to it with a
+    # `goto` (local label) instead of a nested call, keeping the whole command
+    # walk in one C frame. The handler's loop-back `jmp newobjex` and the
+    # `mapwait` rts are emitted by the normal block machinery (local goto /
+    # balanced Return). Only same-bank targets can be local; a cross-bank
+    # target (none expected for the SF map SCC) falls back to the nested call.
+    _inline_loop = bool(getattr(insn, 'inline_dispatch_loop', False))
+    _site_bank = (site_pc24 >> 16) & 0xFF
+    _local = local_labels if local_labels is not None else None
     lines.append("  switch (_idx) {")
     for i, e in enumerate(entries):
         if e is None or e == 0:
@@ -1426,6 +1445,15 @@ def _emit_indirect_dispatch(insn) -> List[str]:
         base_name = _NAME_RESOLVER.get(tgt_addr)
         if base_name is None:
             base_name = f"bank_{target_bank:02X}_{local_pc:04X}"
+        # Inline-dispatch-loop goto-mode: jump to the imported local handler
+        # block at the dispatch site's live (m, x).
+        if _inline_loop and not is_jsr and target_bank == _site_bank:
+            _glabel = f"L_{local_pc:04X}_M{em}X{ex}"
+            if _local is None or _glabel in _local:
+                lines.append(
+                    f"    case {i}: goto {_glabel}; "
+                    f"/* inline_dispatch_loop -> local handler ${local_pc:04X} */")
+                continue
         # JMP/JML path: dispatched handler's return value propagates
         # straight back to OUR caller (tail-call semantics — `return _r`).
         # JSR path: handler returns to dispatcher; SKIP-N propagation
