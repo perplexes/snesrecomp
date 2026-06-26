@@ -224,6 +224,24 @@ void RecompStackPush(const char *name) {
       }
     }
   }
+  /* SF_PROBE_NEWOBJS: log mapptr/mapcnt every time the map interpreter is
+   * entered (NEWOBJS_L $03E183 / NEWOBJEX $03E18D / mapwait $03E24A). Decisive
+   * for whether the intro map script ADVANCES per frame (mapptr changes) or is
+   * STUCK re-walking the same command. Read-only WRAM probe. */
+  {
+    static int s_np = -1, s_nn = 0;
+    if (s_np < 0) s_np = getenv("SF_PROBE_NEWOBJS") ? 1 : 0;
+    if (s_np && name && s_nn < 4000 &&
+        (strstr(name, "E183") || strstr(name, "E18D") || strstr(name, "E24A") ||
+         strstr(name, "NEWOBJS") || strstr(name, "NEWOBJEX") || strstr(name, "MAPWAIT"))) {
+      s_nn++;
+      unsigned mapptr = g_ram[0x1782] | (g_ram[0x1783] << 8);
+      unsigned mapcnt = g_ram[0x1780] | (g_ram[0x1781] << 8);
+      unsigned mapbank = g_ram[0x1af7];
+      fprintf(stderr, "[newobjs d%d] %s mapbank=%02x mapptr=%04x mapcnt=%04x\n",
+              g_recomp_stack_top, name, mapbank, mapptr, mapcnt);
+    }
+  }
   // Boundary auditor (always-on; no-op when SNESRECOMP_TRACE=0).
   // Recorded AFTER the stack push so stack_depth reflects post-push state.
   boundary_audit_record_entry(name);
