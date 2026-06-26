@@ -39,6 +39,7 @@ _RECOMPILER_DIR = _THIS_DIR.parent
 if str(_RECOMPILER_DIR) not in sys.path:
     sys.path.insert(0, str(_RECOMPILER_DIR))
 
+import snes65816  # noqa: E402  (module ref: read live _ACTIVE_RELOC_REGIONS global)
 from snes65816 import (  # noqa: E402
     decode_insn, lorom_offset, addr_to_rom_offset, addr_in_reloc_region, Insn,
     ABS, INDIR, INDIR_X, LONG, IMM,
@@ -1269,8 +1270,10 @@ def decode_function(rom: bytes, bank: int, start: int,
     # callee exits it actually queries.
     #
     # So: build a base key from everything EXCEPT callee_exit_mx content (each
-    # input by CONTENT via _env_token; the process-global _GLOBAL_INLINE_SKIP,
-    # the only mutable global the decode path reads, folded in too). Whether
+    # input by CONTENT via _env_token; the two process-global mutables the
+    # decode path reads — _GLOBAL_INLINE_SKIP and snes65816._ACTIVE_RELOC_REGIONS
+    # (the reloc registry consulted as a fallback when reloc_regions is None) —
+    # folded in too). Whether
     # callee_exit_mx is None changes control flow (the decoder skips the lookup
     # entirely when None), so its None-ness is part of the base key. Under that
     # base key, keep a small list of (deps, graph): `deps` is the exact set of
@@ -1289,6 +1292,8 @@ def decode_function(rom: bytes, bank: int, start: int,
         _env_token(sibling_entry_pcs),
         _freeze(reloc_regions) if reloc_regions else 0,
         _freeze(_GLOBAL_INLINE_SKIP) if _GLOBAL_INLINE_SKIP else 0,
+        _freeze(snes65816._ACTIVE_RELOC_REGIONS)
+        if snes65816._ACTIVE_RELOC_REGIONS else 0,
         callee_exit_mx is None,
     )
     global _DECODE_CACHE_HITS, _DECODE_CACHE_MISSES

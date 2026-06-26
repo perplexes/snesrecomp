@@ -175,7 +175,11 @@ def _route_signature(parsed, rom, dispatch_helpers):
     rom identity (constant per process), the dispatch_helpers content, and for
     each (bank, cfg) in iteration order its hand-written exit_mx_at directives
     and the ordered (name, start, end, inline_skip) of every entry — the exact
-    fields the seeding, fixpoint, and emit steps consult."""
+    fields the seeding, fixpoint, and emit steps consult. Also folds in the
+    process-global snes65816._ACTIVE_RELOC_REGIONS registry, which the decode
+    path reads as a fallback when reloc_regions is None — so a result-memo
+    replay can never cross a reloc-regime flip between autoroute passes."""
+    import snes65816  # local import to avoid cycle at import time
     from v2.decoder import _freeze  # local import to avoid cycle at import time
     cfg_sigs = []
     for bank, _cfg_path, cfg in parsed:
@@ -188,7 +192,8 @@ def _route_signature(parsed, rom, dispatch_helpers):
             for (b, a, m, x) in cfg.exit_mx_at
         ))
         cfg_sigs.append((bank, exit_sig, entry_sig))
-    return (id(rom), len(rom), _freeze(dispatch_helpers), tuple(cfg_sigs))
+    return (id(rom), len(rom), _freeze(dispatch_helpers), tuple(cfg_sigs),
+            _freeze(snes65816._ACTIVE_RELOC_REGIONS))
 
 
 def detect_and_route(parsed, rom: bytes,

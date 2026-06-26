@@ -2295,8 +2295,11 @@ def main() -> int:
               f"{cs['misses']}m ({hit_pct:.1f}% hit rate); "
               f"{cs['size']} unique keys at end")
     else:
+        # The cache is enabled only during the autoroute fixpoint and turned
+        # back off afterward, so it always reads DISABLED here — that is not
+        # evidence the --no-decode-cache flag was passed.
         print(f"\nv2_regen wall-clock: {final_elapsed:.1f}s; "
-              f"decode cache: DISABLED (--no-decode-cache)")
+              f"decode cache: off at end (enabled only during autoroute)")
 
     # Stub lint. Hard gate: no stub markers in any emitted .c file.
     # See _STUB_MARKERS comment for the rationale. There is no
