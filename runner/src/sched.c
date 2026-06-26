@@ -87,7 +87,8 @@ uint32_t      g_sched_block_cost  = SCHED_BLOCK_COST_DEFAULT;
 static uint32_t g_sched_cycles        = 0;       /* master cycles within current frame */
 static uint16_t g_sched_prev_scanline = 0;       /* scanline at end of last tick */
 static int      g_sched_nmi_fired     = 0;       /* edge latch: VBlank processed this frame */
-static uint16_t g_sched_irq_scanline  = 0xFFFF;  /* scanline of last IRQ delivery */
+static uint16_t g_sched_irq_scanline  = 0xFFFF;  /* scanline of last V-IRQ delivery */
+static uint16_t g_sched_hirq_scanline = 0xFFFF;  /* scanline of last H-IRQ delivery */
 
 /* -- External symbols (defined elsewhere in the engine) -------------------- */
 
@@ -106,10 +107,30 @@ extern int        snes_frame_counter; /* snes/snes.h -- defined in snes.c */
 static void sched_reset_latches(void) {
     g_sched_nmi_fired    = 0;
     g_sched_irq_scanline = 0xFFFF;
+    g_sched_hirq_scanline = 0xFFFF;
     g_sched_prev_scanline = 0;
 }
 
 /* -- API -------------------------------------------------------------------- */
+
+/* Current intra-scanline H-counter (0..SCHED_CYCLES_PER_SCANLINE-1) derived
+ * from the master clock. Lets $4212 H-blank polling read a real beam position
+ * instead of a synthetic fixed-step counter. Valid while the scheduler is the
+ * active timekeeper (g_sched_enabled); callers fall back to the legacy model
+ * otherwise. */
+uint16_t sched_current_hpos(void) {
+    /* Include cycles accumulated since the last WatchdogCheck flush
+     * (g_pending_cycles, fed by cpu_cycle_tick per recompiled block). The
+     * scheduler clock g_sched_cycles only advances on the ~10k-block watchdog
+     * flush, so a tight $4212 H-blank busy-wait would otherwise read a frozen
+     * beam for thousands of iterations between flushes. Adding the unflushed
+     * pending cycles makes the H-counter advance every loop iteration, which is
+     * both more truthful and what the game's H-blank polls expect. This only
+     * READS g_pending_cycles (does not consume it); the normal flush is
+     * unaffected, so there is no double-counting. */
+    return (uint16_t)((g_sched_cycles + (uint32_t)g_pending_cycles)
+                      % SCHED_CYCLES_PER_SCANLINE);
+}
 
 void sched_frame_start(void) {
     g_sched_cycles = 0;
@@ -277,6 +298,49 @@ void sched_tick(uint32_t block_cost) {
             g_in_coop_pump = 0;
 
             /* Safety-net clear (harmless if the handler already $4211-read-cleared). */
+            g_snes->inIrq = false;
+        }
+    }
+
+    /* -- IRQ (HTIMER) ------------------------------------------------------ */
+    /* H-timer IRQ. NMITIMEN ($4200) bit 4 = hIrqEnabled. Hardware modes:
+     *   - H-IRQ only (bit4, not bit5): IRQ on EVERY scanline when the
+     *     H-counter reaches hTimer (262 deliveries per frame).
+     *   - H-IRQ + V-IRQ (bit4 + bit5): IRQ once per frame at scanline vTimer,
+     *     H-counter hTimer. The V-IRQ block above already delivers one IRQ per
+     *     frame at vTimer, so the combined mode is handled there; we exclude it
+     *     here (`!vIrqEnabled`) to avoid a double fire on the same crossing.
+     *
+     * Granularity: the scheduler ticks every ~10k recompiled blocks, so the
+     * H-counter is sampled, not dot-exact. We therefore model H-IRQ as "fires
+     * once when the beam advances onto a new scanline while H-IRQ is enabled",
+     * i.e. one delivery per scanline crossing. Edge-latched on the scanline so
+     * a tick that does not advance the scanline does not re-fire; P.I-gated and
+     * reentrancy-guarded, exactly mirroring the V-IRQ path. The latch resets
+     * each VBlank (sched_reset_latches) so delivery resumes every frame.
+     *
+     * Delivered through the SAME g_coop_irq_pump shim as V-IRQ -- the engine
+     * stays game-agnostic; the pump runs the game's IRQ body. */
+    if (g_snes && g_snes->hIrqEnabled && !g_snes->vIrqEnabled &&
+        !g_in_coop_pump && g_coop_irq_pump) {
+        int h_edge = 0;
+        if (frames_crossed > 0) {
+            /* Wrapped at least one frame -- scanline(s) certainly advanced. */
+            h_edge = 1;
+        } else if (scanline != prev_sl) {
+            /* Advanced onto a new scanline -- one H-IRQ for the crossing. */
+            h_edge = 1;
+        }
+
+        if (h_edge && scanline != g_sched_hirq_scanline && !g_cpu._flag_I) {
+            g_sched_hirq_scanline = scanline;  /* latch: one H-IRQ per scanline */
+
+            g_snes->inIrq = true;
+
+            g_in_coop_pump = 1;
+            g_coop_irq_pump();
+            g_in_coop_pump = 0;
+
             g_snes->inIrq = false;
         }
     }

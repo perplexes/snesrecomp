@@ -149,6 +149,14 @@ void sched_frame_start(void);
  */
 void sched_tick(uint32_t block_cost);
 
+/*
+ * Current intra-scanline H-counter (0..SCHED_CYCLES_PER_SCANLINE-1) derived
+ * from the master cycle clock. Used by the $4212 H-blank poll so the game reads
+ * a real beam position instead of a synthetic fixed-step counter. Only
+ * meaningful while the scheduler is active (g_sched_enabled).
+ */
+uint16_t sched_current_hpos(void);
+
 #ifdef __cplusplus
 }
 #endif

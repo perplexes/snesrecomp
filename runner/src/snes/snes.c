@@ -239,12 +239,23 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
       return val;
     }
     case 0x4212: {
-      // Static-recomp h-counter model: real hardware updates hPos every
-      // dot-clock; recomp has no dot-clock, so each $4212 read advances
-      // hPos by a fixed step. Calibrated so a typical busy-wait crosses
-      // both edges in ~10-20 reads. Bit 6 = hblank (dots ~1024..1364 of
-      // a 1364-dot scanline). See docs/VIRTUAL_HW_CONTRACT.md.
-      snes->hPos = (snes->hPos + 64) % 1364;
+      // H-counter model. When the cycle scheduler is the active timekeeper
+      // (Phase B), drive hPos from the REAL master clock so the game's H-blank
+      // polls read a true beam position: the scheduler's intra-scanline cycle
+      // (g_sched_cycles % 1364) is the dot position within the 1364-cycle
+      // scanline. When the scheduler is off (e.g. SMW flipbook path), fall back
+      // to the legacy synthetic model: real hardware updates hPos every
+      // dot-clock; recomp has no dot-clock, so each $4212 read advances hPos by
+      // a fixed step calibrated so a typical busy-wait crosses both edges in
+      // ~10-20 reads. Bit 6 = hblank (dots ~1024..1364). See
+      // docs/VIRTUAL_HW_CONTRACT.md.
+      { extern int g_sched_enabled; extern uint16_t sched_current_hpos(void);
+        if (g_sched_enabled) {
+          snes->hPos = sched_current_hpos();
+        } else {
+          snes->hPos = (snes->hPos + 64) % 1364;
+        }
+      }
       uint8_t val = (snes->autoJoyTimer > 0);
       val |= (snes->hPos >= 1024) << 6;
       val |= snes->inVblank << 7;
@@ -409,7 +420,21 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
           }
         }
         dma_startDma(snes->dma, run, false);
-        while (dma_cycle(snes->dma)) {}
+        // Charge the real DMA duration to the master clock. dma_cycle() steps
+        // the channel-DMA state machine; each step is 2 master cycles (the
+        // dmaTimer budget is 16 setup + 6/byte + 8/channel, drained 2 per
+        // step), so total master cycles = step_count * 2. This is the standard
+        // ~8-cycle/byte + overhead DMA cost. Feed it through g_pending_cycles --
+        // the same accumulator cpu_cycle_tick() uses -- so WatchdogCheck()
+        // flushes it into sched_tick() with the per-block CPU cycles. The CPU is
+        // halted during DMA, so this is additive time, not double-counting.
+        uint32_t dma_steps = 0;
+        while (dma_cycle(snes->dma)) { dma_steps++; }
+        // The final dma_cycle() that flips dmaBusy off is a no-op step (it just
+        // observes no active channel), so it does not represent real bus time:
+        // drop it to avoid a +2-cycle overcharge per MDMA trigger.
+        if (dma_steps) dma_steps--;
+        { extern uint64_t g_pending_cycles; g_pending_cycles += (uint64_t)dma_steps * 2u; }
       }
       break;
     }
