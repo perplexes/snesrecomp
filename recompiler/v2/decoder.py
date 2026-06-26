@@ -1108,11 +1108,19 @@ def set_global_inline_skip(m: Optional[Dict[int, int]]) -> None:
     _GLOBAL_INLINE_SKIP = dict(m) if m else {}
 
 
-def set_decode_cache_enabled(enabled: bool) -> None:
-    """Enable/disable decode_function memoization. Disabling clears."""
+def set_decode_cache_enabled(enabled: bool, *, clear: bool = True) -> None:
+    """Enable/disable decode_function memoization.
+
+    By default disabling also clears the cache (the historical contract,
+    used at startup to force a clean off state). Pass clear=False to flip
+    the consult/populate switch WITHOUT discarding cached graphs — used to
+    scope memoization to the exit-mx autoroute (which decodes the same
+    functions across many fixpoint passes) while leaving the cache content
+    intact between passes so cross-pass hits land. Memory is reclaimed at
+    the next phase boundary via clear_decode_cache()."""
     global _DECODE_CACHE_ENABLED
     _DECODE_CACHE_ENABLED = bool(enabled)
-    if not _DECODE_CACHE_ENABLED:
+    if not _DECODE_CACHE_ENABLED and clear:
         clear_decode_cache()
 
 
@@ -1160,6 +1168,61 @@ def _freeze(obj):
     return obj
 
 
+def _env_token(obj):
+    """Content token for a decode-affecting dict/set/list cache-key input.
+
+    A frozen content snapshot, or None for an absent input. Used for the small/
+    constant env inputs (dispatch_helpers, callee_inline_skip, …). The large,
+    constantly-mutated `callee_exit_mx` is deliberately NOT keyed this way — see
+    decode_function's dependency-keyed memo."""
+    if obj is None:
+        return None
+    return _freeze(obj)
+
+
+class _ExitMxReader:
+    """Read-through recorder for `callee_exit_mx` during one decode.
+
+    A function's decoded graph depends on `callee_exit_mx` ONLY through the
+    specific (target_pc24, m, x) entries the decoder queries for the JSR/JSL
+    callees it walks — never the whole dict (which can hold thousands of items
+    and is mutated on every fixpoint pass). Wrapping the dict in this reader for
+    the duration of a decode captures exactly that dependency set: every `.get`
+    the decoder performs, mapped to the value returned. The decode cache then
+    reuses the graph whenever those same queries still return the same values,
+    which is provably equivalent to re-decoding (the decoder is a deterministic
+    function of the values its queries return, given the other fixed inputs).
+
+    The decoder only ever calls `.get(key)` on callee_exit_mx (verified), but
+    __getitem__/__contains__ are recorded too for robustness."""
+
+    __slots__ = ("_d", "reads")
+
+    def __init__(self, d):
+        self._d = d
+        self.reads = {}
+
+    def get(self, k, default=None):
+        v = self._d.get(k, default)
+        self.reads[k] = self._d.get(k)
+        return v
+
+    def __getitem__(self, k):
+        present = k in self._d
+        self.reads[k] = self._d.get(k)
+        if not present:
+            raise KeyError(k)
+        return self._d[k]
+
+    def __contains__(self, k):
+        self.reads[k] = self._d.get(k)
+        return k in self._d
+
+    def deps(self):
+        """Frozen, deterministic dependency tuple ((key, value), …)."""
+        return tuple(sorted(self.reads.items(), key=lambda kv: repr(kv[0])))
+
+
 def decode_function(rom: bytes, bank: int, start: int,
                     entry_m: int, entry_x: int,
                     *, end: Optional[int] = None,
@@ -1197,47 +1260,83 @@ def decode_function(rom: bytes, bank: int, start: int,
             callee_inline_skip=callee_inline_skip,
         )
 
-    cache_key = (
+    # Dependency-keyed memo. The original `id()`-based key was the cache bug:
+    # dicts rebuilt each pass got fresh ids, so identical decodes never shared
+    # an entry. Naively switching to a full content key for callee_exit_mx is
+    # also wrong-shaped: that dict holds thousands of items and is mutated every
+    # fixpoint pass, so a content key changes constantly and almost never hits —
+    # even though a given function's decode only depends on the handful of
+    # callee exits it actually queries.
+    #
+    # So: build a base key from everything EXCEPT callee_exit_mx content (each
+    # input by CONTENT via _env_token; the process-global _GLOBAL_INLINE_SKIP,
+    # the only mutable global the decode path reads, folded in too). Whether
+    # callee_exit_mx is None changes control flow (the decoder skips the lookup
+    # entirely when None), so its None-ness is part of the base key. Under that
+    # base key, keep a small list of (deps, graph): `deps` is the exact set of
+    # callee_exit_mx queries the decode made and the values returned (recorded
+    # by _ExitMxReader). A cached graph is reused iff every recorded query still
+    # returns the same value — provably equivalent to re-decoding.
+    base_key = (
         hash(rom), bank, start, entry_m & 1, entry_x & 1, end, max_insns,
-        id(dispatch_helpers) if dispatch_helpers is not None else 0,
-        id(indirect_call_tables) if indirect_call_tables is not None else 0,
-        id(indirect_dispatch) if indirect_dispatch is not None else 0,
-        id(hle_dispatch) if hle_dispatch is not None else 0,
-        id(data_regions) if data_regions is not None else 0,
-        id(callee_exit_mx) if callee_exit_mx is not None else 0,
-        id(callee_exit_mx_modes) if callee_exit_mx_modes is not None else 0,
-        id(callee_inline_skip) if callee_inline_skip is not None else 0,
-        id(sibling_entry_pcs) if sibling_entry_pcs is not None else 0,
-        # reloc_regions changes which bytes back an address — a stale cache
-        # hit must not mix relocated and non-relocated decodes of the same
-        # (pc, m, x). Freeze the regions (small list of int 5-tuples) into
-        # the key directly rather than id() so structurally-equal region
-        # sets share cache entries and distinct ones never collide.
+        _env_token(dispatch_helpers),
+        _env_token(indirect_call_tables),
+        _env_token(indirect_dispatch),
+        _env_token(hle_dispatch),
+        _env_token(data_regions),
+        _env_token(callee_exit_mx_modes),
+        _env_token(callee_inline_skip),
+        _env_token(sibling_entry_pcs),
         _freeze(reloc_regions) if reloc_regions else 0,
+        _freeze(_GLOBAL_INLINE_SKIP) if _GLOBAL_INLINE_SKIP else 0,
+        callee_exit_mx is None,
     )
-    cached = _DECODE_CACHE.get(cache_key)
-    if cached is not None:
-        global _DECODE_CACHE_HITS
-        _DECODE_CACHE_HITS += 1
-        return cached
+    global _DECODE_CACHE_HITS, _DECODE_CACHE_MISSES
+    bucket = _DECODE_CACHE.get(base_key)
+    if bucket is not None:
+        for deps, graph in bucket:
+            if all(callee_exit_mx.get(k) == v for k, v in deps):
+                _DECODE_CACHE_HITS += 1
+                return graph
 
-    global _DECODE_CACHE_MISSES
     _DECODE_CACHE_MISSES += 1
-    graph = _decode_function_uncached(
-        rom, bank, start, entry_m, entry_x,
-        end=end, max_insns=max_insns,
-        dispatch_helpers=dispatch_helpers,
-        indirect_call_tables=indirect_call_tables,
-        indirect_dispatch=indirect_dispatch,
-        hle_dispatch=hle_dispatch,
-        data_regions=data_regions,
-        callee_exit_mx=callee_exit_mx,
-        callee_exit_mx_modes=callee_exit_mx_modes,
-        sibling_entry_pcs=sibling_entry_pcs,
-        reloc_regions=reloc_regions,
-        callee_inline_skip=callee_inline_skip,
-    )
-    _DECODE_CACHE[cache_key] = graph
+    if callee_exit_mx is None:
+        graph = _decode_function_uncached(
+            rom, bank, start, entry_m, entry_x,
+            end=end, max_insns=max_insns,
+            dispatch_helpers=dispatch_helpers,
+            indirect_call_tables=indirect_call_tables,
+            indirect_dispatch=indirect_dispatch,
+            hle_dispatch=hle_dispatch,
+            data_regions=data_regions,
+            callee_exit_mx=None,
+            callee_exit_mx_modes=callee_exit_mx_modes,
+            sibling_entry_pcs=sibling_entry_pcs,
+            reloc_regions=reloc_regions,
+            callee_inline_skip=callee_inline_skip,
+        )
+        deps = ()
+    else:
+        reader = _ExitMxReader(callee_exit_mx)
+        graph = _decode_function_uncached(
+            rom, bank, start, entry_m, entry_x,
+            end=end, max_insns=max_insns,
+            dispatch_helpers=dispatch_helpers,
+            indirect_call_tables=indirect_call_tables,
+            indirect_dispatch=indirect_dispatch,
+            hle_dispatch=hle_dispatch,
+            data_regions=data_regions,
+            callee_exit_mx=reader,
+            callee_exit_mx_modes=callee_exit_mx_modes,
+            sibling_entry_pcs=sibling_entry_pcs,
+            reloc_regions=reloc_regions,
+            callee_inline_skip=callee_inline_skip,
+        )
+        deps = reader.deps()
+    if bucket is None:
+        _DECODE_CACHE[base_key] = [(deps, graph)]
+    else:
+        bucket.append((deps, graph))
     return graph
 
 
