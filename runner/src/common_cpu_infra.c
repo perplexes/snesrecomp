@@ -429,6 +429,8 @@ void WatchdogCheck(void) {
      * the clock never stalls. */
     uint32_t cyc = (uint32_t)g_pending_cycles;
     g_pending_cycles = 0;
+    /* Zero-cycle fallback floor (CONSOLIDATION DECISION: KEEP — intended, not
+     * scaffolding; see SCHED_BLOCK_COST definition in sched.h). */
     if (cyc == 0) cyc = SCHED_BLOCK_COST;
     sched_tick(cyc);
     if (snes_frame_counter != pre_frame) {
@@ -448,6 +450,17 @@ void WatchdogCheck(void) {
    * ran here when g_sched_enabled==0 has been removed. Star Fox always enables
    * the scheduler (sf_rtl.c) and branches past this point, so the path was dead
    * for the shipping line; g_coop_irq_pump is NULL for every other game. */
+  /* ---- Phase-D status (consolidation closeout) ----
+   * - Per-frame trampoline (SfCallMasterLoop / SF_TRAMPOLINE, game-side
+   *   src/sf_rtl.c): no longer the active drive path. The real boot self-loops
+   *   inside I_RESET on the scheduler; the trampoline is demoted to an opt-in
+   *   debug aid (SF_TRAMPOLINE=1), not gone. NOT removable yet.
+   * - Stale "carve entry point" cfg comments: NONE remain in recomp/ or runner/.
+   * - SCHED_BLOCK_COST zero-cycle floor: KEEP-decided (see sched.h).
+   * - ONLY remaining Phase-D-ish item: SfCoopIrqPump Tier-2 retirement (#75),
+   *   DEFERRED (high risk). It needs the engine level-trigger path (b19e5dc),
+   *   must stay display-neutral, and touches the live IRQ path that drives the
+   *   working self-drive — so it is not part of this closeout. */
 watchdog_hang_check:;
   double elapsed = (double)(clock() - g_frame_start_clock) / CLOCKS_PER_SEC;
   /* Boot has no watchdog. I_RESET runs once and uploads the SPC

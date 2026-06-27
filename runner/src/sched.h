@@ -81,6 +81,15 @@ extern "C" {
  *   If the game runs too slow (same problem as before): increase cost.
  *
  *   Overridable via SF_SCHED_BLOCK_COST env var (parsed in WatchdogCheck init).
+ *
+ *   CONSOLIDATION DECISION (Phase-D closeout): KEEP. This is NOT scaffolding —
+ *   it is the intended zero-cycle fallback floor. When a WatchdogCheck tick
+ *   reports zero real cycles (a pure-HLE stretch with no recompiled blocks),
+ *   the consume site (common_cpu_infra.c, `if (cyc == 0) cyc = SCHED_BLOCK_COST`)
+ *   substitutes this value so the cycle-faithful clock never stalls and IRQ
+ *   delivery keeps progressing. (A rename to e.g. SCHED_ZERO_CYCLE_FLOOR is an
+ *   optional pure-mechanical cleanup; left as-is here to keep this a comment-only
+ *   change.)
  */
 #define SCHED_BLOCK_COST_DEFAULT  500u
 /* Active value: overridden by SF_SCHED_BLOCK_COST env var if set. */
