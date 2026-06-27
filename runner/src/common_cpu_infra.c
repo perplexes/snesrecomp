@@ -416,36 +416,20 @@ void WatchdogCheck(void) {
     if (snes_frame_counter != pre_frame) {
       g_frame_start_clock = clock();
     }
-    /* Before the game enables V-IRQ, sched_tick cannot deliver IRQ, so keep the
-     * cooperative pump driving the IRQ-set spin-wait flags (boot APU upload /
-     * transfer double-buffer). Once vIrqEnabled flips true, sched_tick delivers
-     * the real V-IRQ and this redundant pump stops -- a clean handoff. */
-    if (!g_snes->vIrqEnabled && g_coop_irq_pump) {
-      g_in_coop_pump = 1;
-      int progressed = g_coop_irq_pump();
-      g_in_coop_pump = 0;
-      if (progressed) g_frame_start_clock = clock();
-    }
+    /* No early-boot cooperative pump here (Tier-1 retirement, NO-CARVES policy).
+     * Before the game enables V-IRQ, hardware takes no interrupt (guest P.I set,
+     * no timer armed), so the scheduler correctly delivers nothing and the
+     * free-running beam clock above covers the early raster spins. The removed
+     * pump injected spurious irqcode_l runs hardware would never execute. The
+     * scheduled V-IRQ delivery (sched.c, post-vIrqEnabled) is unaffected. */
     /* Fall through to the hang check -- the scheduler path still needs the
      * 5-second watchdog to fire on genuine hangs. */
     goto watchdog_hang_check;
   }
-  /* Cooperative IRQ pump: advance interrupt-only hardware so spin-waits on
-   * IRQ-set flags fall through (see CoopIrqPumpFunc in the header). Guarded
-   * against reentrancy because the pump itself runs recompiled code whose
-   * blocks call WatchdogCheck. Runs during boot too (before the
-   * frame_counter==0 gate below), since Star Fox's boot init already waits
-   * on the IRQ-driven transfer_l double-buffer flags. Also runs post-boot
-   * when the scheduler is NOT enabled (g_sched_enabled == 0). */
-  if (g_coop_irq_pump && !g_in_coop_pump) {
-    g_in_coop_pump = 1;
-    int progressed = g_coop_irq_pump();
-    g_in_coop_pump = 0;
-    if (progressed) {
-      g_frame_start_clock = clock();  /* we advanced; reset the hang timer */
-      return;
-    }
-  }
+  /* (Tier-1 retirement) The legacy non-scheduler cooperative IRQ pump path that
+   * ran here when g_sched_enabled==0 has been removed. Star Fox always enables
+   * the scheduler (sf_rtl.c) and branches past this point, so the path was dead
+   * for the shipping line; g_coop_irq_pump is NULL for every other game. */
 watchdog_hang_check:;
   double elapsed = (double)(clock() - g_frame_start_clock) / CLOCKS_PER_SEC;
   /* Boot has no watchdog. I_RESET runs once and uploads the SPC
