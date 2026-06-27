@@ -20,6 +20,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/widescreen.c
     ${SNESRECOMP_RUNNER_ROOT}/src/recomp_hw.c
     ${SNESRECOMP_RUNNER_ROOT}/src/framedump.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/capture.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher.c
     ${SNESRECOMP_RUNNER_ROOT}/src/crc32.c
     ${SNESRECOMP_RUNNER_ROOT}/src/sha256.c
