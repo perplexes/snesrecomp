@@ -74,6 +74,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 /* -- Public globals -------------------------------------------------------- */
 
@@ -193,6 +194,38 @@ void sched_tick(uint32_t block_cost) {
 
             if (g_snes) {
                 g_snes->inVblank = true;
+            }
+
+            /* SF_BOOT_DISCRIM: call-stack boot-phase discriminator. Per the #66
+             * methodology lock-in, judge intro-vs-title ONLY by the live recomp
+             * call stack (never mapptr/gamemode, which do not distinguish the
+             * two). Sampled once per VBlank edge: scan for INTRO_L_* / TITLESEQ_L_*
+             * and log every phase transition + the frame TITLESEQ is first
+             * reached. Read-only; no game-RAM or CPU effect. */
+            {
+                static int s_dis = -1;
+                if (s_dis < 0) s_dis = getenv("SF_BOOT_DISCRIM") ? 1 : 0;
+                if (s_dis) {
+                    extern const char *g_recomp_stack[];
+                    extern int g_recomp_stack_top;
+                    static int s_phase = 0;          /* 0=pre 1=intro 2=title */
+                    int seen_intro = 0, seen_title = 0;
+                    for (int i = 0; i < g_recomp_stack_top; i++) {
+                        const char *n = g_recomp_stack[i];
+                        if (!n) continue;
+                        if (strncmp(n, "TITLESEQ_L", 10) == 0) seen_title = 1;
+                        else if (strncmp(n, "INTRO_L", 7) == 0) seen_intro = 1;
+                    }
+                    int ph = seen_title ? 2 : (seen_intro ? 1 : 0);
+                    if (ph != s_phase) {
+                        fprintf(stderr, "[boot-discrim] frame=%d phase %d->%d (%s) depth=%d\n",
+                                snes_frame_counter, s_phase, ph,
+                                ph == 2 ? "TITLESEQ_L" : (ph == 1 ? "INTRO_L" : "pre"),
+                                g_recomp_stack_top);
+                        fflush(stderr);
+                        s_phase = ph;
+                    }
+                }
             }
 
             /* Per-frame present hook: fire once per VBlank edge REGARDLESS of
