@@ -86,6 +86,11 @@ uint32_t      g_sched_block_cost  = SCHED_BLOCK_COST_DEFAULT;
 /* -- Internal state -------------------------------------------------------- */
 
 static uint32_t g_sched_cycles        = 0;       /* master cycles within current frame */
+/* Monotonic master-cycle accumulator (NEVER reset). Unlike g_sched_cycles
+ * (which wraps every frame), this sums every block_cost the scheduler ticks, so
+ * (g_sched_total_cycles / 21477.272) is a faithful emulated-time clock in ms
+ * for capture/telemetry. Read-only outside sched.c; see sched.h. */
+uint64_t g_sched_total_cycles = 0;
 static uint16_t g_sched_prev_scanline = 0;       /* scanline at end of last tick */
 static int      g_sched_nmi_fired     = 0;       /* edge latch: VBlank processed this frame */
 static uint16_t g_sched_irq_scanline  = 0xFFFF;  /* scanline of last V-IRQ delivery */
@@ -140,6 +145,10 @@ void sched_frame_start(void) {
 
 void sched_tick(uint32_t block_cost) {
     if (!block_cost) return;
+
+    /* Monotonic emulated-time accumulator (faithful master cycles; never
+     * wrapped). Drives the capture harness's per-frame emu_ms timestamp. */
+    g_sched_total_cycles += block_cost;
 
     /* -- Advance cycle counter with frame-wrap handling -------------------- */
     /* Use modulo so arbitrarily large block_cost values (including

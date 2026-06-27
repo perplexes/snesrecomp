@@ -106,6 +106,16 @@ extern uint32_t g_sched_block_cost;
 /* 1 when SF_SCHED=1 env var was set at startup; checked in WatchdogCheck. */
 extern int g_sched_enabled;
 
+/* Monotonic master-cycle accumulator (never reset, unlike the per-frame
+ * g_sched_cycles). Sums every block_cost passed to sched_tick. A faithful
+ * emulated-time clock: emu_ms = g_sched_total_cycles / 21477.272
+ * (NTSC master clock 21477272 Hz). Used by the capture harness (capture.c). */
+extern uint64_t g_sched_total_cycles;
+
+/* NTSC master clock in Hz (cycles/sec). One frame = SCHED_CYCLES_PER_FRAME
+ * (357368) cycles = 16.6398 ms => 60.0988 fps. */
+#define SCHED_MASTER_CLOCK_HZ  21477272.0
+
 /*
  * Optional NMI handler callback -- game layer registers this if it wants the
  * scheduler to call a game-specific NMI body (e.g. run the NMI handler that
