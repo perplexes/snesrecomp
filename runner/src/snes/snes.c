@@ -24,7 +24,14 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr);
 void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val);
 
 Snes* snes_init(uint8_t *ram) {
-  Snes* snes = malloc(sizeof(Snes));
+  // calloc (not malloc): zero-initialize the struct so uninitialized fields
+  // don't hold heap garbage. BUG-001 root cause: disableRender (a bool)
+  // started as garbage (e.g. 102), and Star Fox -- whose whole boot+main loop
+  // runs synchronously inside I_RESET and never returns to the per-frame host
+  // loop that resets disableRender -- kept that garbage, so DrawPpuFrameWithPerf
+  // was skipped every frame and the window stayed black. Other games reset the
+  // field each frame so they masked the bug.
+  Snes* snes = calloc(1, sizeof(Snes));
   snes->ram = ram;
 
   snes->cpu = cpu_init();
