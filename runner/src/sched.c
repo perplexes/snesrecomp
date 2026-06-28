@@ -233,6 +233,14 @@ void sched_tick(uint32_t block_cost) {
                                 g_recomp_stack_top);
                         fflush(stderr);
                         s_phase = ph;
+                        /* SF_DISCRIM_STACK: dump the full recomp call stack on each
+                         * phase transition — identifies WHICH scene we entered
+                         * (route-select / briefing / level / NLR-blowout). */
+                        if (getenv("SF_DISCRIM_STACK")) {
+                            for (int i = 0; i < g_recomp_stack_top; i++)
+                                fprintf(stderr, "    [%d] %s\n", i, g_recomp_stack[i] ? g_recomp_stack[i] : "(null)");
+                            fflush(stderr);
+                        }
                     }
                 }
             }
