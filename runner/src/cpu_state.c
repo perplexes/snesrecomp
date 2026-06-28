@@ -466,6 +466,61 @@ static RecompReturn (*_cpu_dispatch_lookup(CpuState *cpu, uint32 pc24))(CpuState
     return NULL;
 }
 
+/* SF_DEBUG_INTERP_SNAPSHOT: DEBUG-ONLY diagnostic (NEVER in production).
+ * Dumps CpuState + 128KB RAM at the dispatch of a probe PC, so a standalone
+ * Python interpreter can replay the 65C816 from that PC and classify
+ * coroutine-resume behavior (H-framebook vs H-strat). This honors the
+ * locked-in policy: PRODUCTION = compiled static recompilation, no interpreter
+ * ever; an interpreter is allowed ONLY as a debug/diagnostic tool, env-gated,
+ * never linked into a shipping binary. Inert when SF_DEBUG_INTERP_SNAPSHOT is
+ * unset (production builds never set it).
+ *   SF_DEBUG_INTERP_SNAPSHOT=<path-prefix>  (enables; e.g. /tmp/sf_snap)
+ *   SF_DEBUG_INTERP_PC=<hex>                (probe PC; default 0x02D6F6)
+ *   SF_DEBUG_INTERP_MAX=<n>                 (max dumps per (pc,mx); default 2)
+ */
+static void sf_debug_interp_snapshot(CpuState *cpu, uint32 pc24,
+                                     unsigned mx_idx, int found,
+                                     int via_mirror, uint32 source_pc24) {
+    static int s_en = -1;
+    static const char *s_prefix = NULL;
+    static uint32 s_probe_pc = 0;
+    static int s_max = 0;
+    static int s_seq[4] = {0,0,0,0};  /* per-mx sequence (probe pc is fixed) */
+    if (s_en < 0) {
+        s_prefix = getenv("SF_DEBUG_INTERP_SNAPSHOT");
+        s_en = s_prefix ? 1 : 0;
+        const char *pcenv = getenv("SF_DEBUG_INTERP_PC");
+        s_probe_pc = pcenv ? (uint32)strtoul(pcenv, NULL, 16) : 0x02D6F6u;
+        const char *maxenv = getenv("SF_DEBUG_INTERP_MAX");
+        s_max = maxenv ? (int)strtol(maxenv, NULL, 10) : 2;
+        if (s_max <= 0) s_max = 2;
+    }
+    if (!s_en) return;
+    if ((pc24 & 0xFFFFFFu) != s_probe_pc) return;
+    if (mx_idx > 3) return;
+    int seq = s_seq[mx_idx]++;
+    if (seq >= s_max) return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s_pc%06X_mx%d_%d.snap",
+             s_prefix, pc24 & 0xFFFFFFu, mx_idx, seq);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "SF_INTERP_SNAP v1\n");
+    fprintf(f, "pc=0x%06X mx=%u found=%d via_mirror=%d source=0x%06X seq=%d\n",
+            pc24 & 0xFFFFFFu, mx_idx, found, via_mirror, source_pc24 & 0xFFFFFFu, seq);
+    fprintf(f, "A=0x%04X X=0x%04X Y=0x%04X S=0x%04X D=0x%04X DB=0x%02X PB=0x%02X\n",
+            cpu->A, cpu->X, cpu->Y, cpu->S, cpu->D, cpu->DB, cpu->PB);
+    fprintf(f, "P=0x%02X m=%u x=%u e=%u hrv=%u\n",
+            cpu->P, cpu->m_flag, cpu->x_flag, cpu->emulation, cpu->host_return_valid);
+    fprintf(f, "N=%u V=%u Z=%u C=%u I=%u D=%u\n",
+            cpu->_flag_N, cpu->_flag_V, cpu->_flag_Z, cpu->_flag_C, cpu->_flag_I, cpu->_flag_D);
+    fprintf(f, "RAM_BYTES=131072\n");
+    fwrite(cpu->ram, 1, 131072, f);
+    fclose(f);
+    fprintf(stderr, "[interp-snap] dumped %s (mx=%u found=%d source=0x%06X)\n",
+            path, mx_idx, found, source_pc24 & 0xFFFFFFu);
+}
+
 RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
                                   uint16 entry_s_for_miss_restore,
                                   uint32 source_pc24) {
@@ -485,6 +540,7 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
             if (fp != NULL) via_mirror = 1;
         }
     }
+    sf_debug_interp_snapshot(cpu, pc24, mx_idx, fp != NULL, via_mirror, source_pc24);
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
     /* SF_TRACE_BOOT: temporary boot-flow probe — log the first N cross-function
      * dispatches (target, source, hit, mx) to see exactly where the real boot
