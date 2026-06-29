@@ -254,17 +254,18 @@ def _variant_suffix(m: int, x: int) -> str:
 # variant set (runtime dispatch emits one switch case per variant).
 _MX_VARIANTS = ((0, 0), (0, 1), (1, 0), (1, 1))
 
-# force_host_return: per-function flag (set by emit_function via
-# set_force_host_return before emitting each fn). When True, _emit_return
-# emits a terminal that always host-returns RECOMP_RETURN_NORMAL after
-# popping the HW return frame. For "exit epilogue" functions (cfg
-# `force_host_return`), e.g. Star Fox $03:E18A (interpreter exit).
-_G_FORCE_HOST_RETURN: bool = False
+# force_host_return: per-function SET of RTS/RTL site pc24s (set by
+# emit_function via set_force_host_return before emitting each fn). When the
+# current site (src24) is in the set, _emit_return emits a terminal that
+# always host-returns RECOMP_RETURN_NORMAL after popping the HW return frame.
+# For "exit epilogue" sites (cfg `force_host_return:<hex>`), e.g. Star Fox
+# $03:E18C (interpreter exit) and $03:E97A (DOB GREQ_L terminal).
+_G_FORCE_HOST_RETURN_SITES: set = set()
 
 
-def set_force_host_return(b: bool) -> None:
-    global _G_FORCE_HOST_RETURN
-    _G_FORCE_HOST_RETURN = bool(b)
+def set_force_host_return(sites) -> None:
+    global _G_FORCE_HOST_RETURN_SITES
+    _G_FORCE_HOST_RETURN_SITES = set(sites) if sites else set()
 
 
 # Per-target surviving-(m, x) set, installed by v2_regen after its
@@ -1928,7 +1929,7 @@ def _emit_return(op: Return) -> List[str]:
     # the interpreter loop; its RTL pops a JSL-resume whose ancestor frame
     # ancestor-skip mis-matches, so the clean fix is to host-return. The HW
     # return frame is still popped above (restoring the real caller's PC).
-    if _G_FORCE_HOST_RETURN:
+    if src24 in _G_FORCE_HOST_RETURN_SITES:
         pop_lines = [
             "  uint16 _ret_s = cpu->S;",
             "  cpu->S = (uint16)(cpu->S + 1);",

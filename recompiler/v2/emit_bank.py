@@ -78,16 +78,17 @@ class BankEntry:
     # BOTH the canonical (never-pruned) set and the discovered-variants
     # (body-generating) set. None = no extra variants (default).
     force_variants: Optional[list] = None
-    # force_host_return: when True, this function's terminal RTS/RTL always
-    # returns RECOMP_RETURN_NORMAL (host return), bypassing the balanced-
-    # stack / ancestor-skip / dispatch logic. For "exit epilogue" functions
-    # reached via a computed dispatch whose terminal return should unwind to
-    # the dispatch caller rather than dispatch the popped PC (e.g. Star Fox's
-    # map-script interpreter exit $03:E18A: PLB;PLP;RTL, reached via RTS from
-    # inside the interpreter loop; its RTL pops a JSL-resume whose ancestor
-    # frame the ancestor-skip mis-matches, so the clean fix is to host-return).
-    # Set via cfg `force_host_return` on a func line.
-    force_host_return: bool = False
+    # force_host_return: set of RTS/RTL SITE addresses (full pc24, e.g.
+    # 0x03E18C) within this function whose terminal should ALWAYS return
+    # RECOMP_RETURN_NORMAL (host return), bypassing the balanced-stack /
+    # ancestor-skip / dispatch logic. Per-SITE (not per-function) so a
+    # function with multiple returns can host-return only the real terminal
+    # while leaving manufactured-dispatch RTLs (e.g. a loop's dispatch RTL)
+    # intact. For "exit epilogue" sites reached via a computed dispatch whose
+    # return should unwind to the dispatch caller rather than dispatch the
+    # popped PC (e.g. Star Fox's map-script interpreter exit $03:E18C, and
+    # DOBGREQ_L's terminal $03:E97A). Set via cfg `force_host_return:<hex>[,<hex>]`.
+    force_host_return_sites: Optional[set] = None
 
 
 def emit_bank(rom: bytes, bank: int,
@@ -208,7 +209,9 @@ def emit_bank(rom: bytes, bank: int,
             hle_dispatch=hle_dispatch,
             reloc_regions=reloc_regions,
             inline_dispatch_loop_pcs=inline_dispatch_loop_pcs,
-            force_host_return=getattr(entry, 'force_host_return', False),
+            force_host_return_sites=(
+                {(bank << 16) | (a & 0xFFFF) for a in entry.force_host_return_sites}
+                if getattr(entry, 'force_host_return_sites', None) else None),
         )
         parts.append(src)
         parts.append("")  # blank line between functions

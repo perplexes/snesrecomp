@@ -1403,6 +1403,11 @@ def main() -> int:
                     entry_m=em,
                     entry_x=ex,
                 ))
+                # Inherit force_host_return_sites so cloned variants also apply
+                # the per-site host-return directive (the clone is the same
+                # function at a different (m,x); its terminals are the same sites).
+                if getattr(entry, 'force_host_return_sites', None):
+                    new_entries[-1].force_host_return_sites = entry.force_host_return_sites
         cfg.entries = new_entries
 
     _phase("callee_exit_mx_modes_initial")
