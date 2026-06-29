@@ -82,7 +82,7 @@ extern GsuFrameDoneFunc g_gsu_frame_done;
  * presents a coprocessor framebuffer registers this to stop the game's own
  * now-redundant/broken transfer from overwriting the presented frame. The game
  * owns any "presenting yet" state. NULL = no suppression (all channels run). */
-typedef int (*DmaSuppressFunc)(uint8 bAdr, uint8 aBank);
+typedef int (*DmaSuppressFunc)(uint8 bAdr, uint8 aBank, uint16 aAdr);
 extern DmaSuppressFunc g_dma_suppress;
 
 void RecompStackPush(const char *name);

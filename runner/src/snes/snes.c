@@ -419,10 +419,10 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
       // beam-raced DMA can't overwrite the presented frame. The engine knows no
       // game specifics — it just asks the hook per active channel. All other
       // DMAs pass through untouched. NULL hook = no suppression.
-      { extern int (*g_dma_suppress)(uint8_t bAdr, uint8_t aBank); uint8_t run = val;
+      { extern int (*g_dma_suppress)(uint8_t bAdr, uint8_t aBank, uint16_t aAdr); uint8_t run = val;
         if (g_dma_suppress) {
           for (int c = 0; c < 8; c++) if (run & (1 << c)) {
-            if (g_dma_suppress(snes->dma->channel[c].bAdr, snes->dma->channel[c].aBank))
+            if (g_dma_suppress(snes->dma->channel[c].bAdr, snes->dma->channel[c].aBank, snes->dma->channel[c].aAdr))
               run &= (uint8_t)~(1 << c);
           }
         }

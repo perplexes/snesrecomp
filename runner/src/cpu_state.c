@@ -526,6 +526,25 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
                                   uint32 source_pc24) {
     pc24 &= 0xFFFFFFu;
     source_pc24 &= 0xFFFFFFu;
+    /* SF_DISPATCH_COVERAGE=<file>: bitset of every DISPATCHED target pc24
+     * (found or miss). The dispatch path is always compiled (unlike the
+     * cpu_trace_block hook, which is a no-op stub without SNESRECOMP_TRACE).
+     * Diffable vs bsnes's trace-mask executed-PC set to find dispatched
+     * routines our recomp skips. */
+    {
+        static int s_dc = -1; static uint8_t *s_seen; static long s_n;
+        if (s_dc < 0) { const char *p = getenv("SF_DISPATCH_COVERAGE"); s_dc = p ? 1 : 0;
+            if (s_dc) { s_seen = (uint8_t*)calloc(0x200000, 1); } }
+        if (s_dc && s_seen) {
+            uint32_t a = pc24 & 0xFFFFFFu;
+            s_seen[a>>3] |= (0x80 >> (a&7));
+            if ((++s_n & 0x3FF) == 0) {  /* flush every ~1K dispatches */
+                const char *p = getenv("SF_DISPATCH_COVERAGE");
+                FILE *f = fopen(p, "wb");
+                if (f) { fwrite(s_seen, 1, 0x200000, f); fclose(f); }
+            }
+        }
+    }
     unsigned mx_idx = (unsigned)(((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1));
     int via_mirror = 0;
     RecompReturn (*fp)(CpuState *) = _cpu_dispatch_lookup(cpu, pc24);
@@ -542,6 +561,30 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
     }
     sf_debug_interp_snapshot(cpu, pc24, mx_idx, fp != NULL, via_mirror, source_pc24);
     _dispatch_log_record(pc24, source_pc24, mx_idx, fp != NULL, via_mirror);
+    /* SF_DISPATCH_WATCH=hex[,hex...]: log every dispatch (hit or miss) to a
+     * watched PC. Decisive "did routine X ever run" probe for the no-vision
+     * agent. One line per watched dispatch (bounded by N watched PCs). */
+    {
+        static int s_dw = -1, s_n = 0;
+        static uint32_t s_watch[16]; static int s_nwatch = 0;
+        if (s_dw < 0) {
+            const char *e = getenv("SF_DISPATCH_WATCH");
+            s_dw = e ? 1 : 0;
+            if (e) { char buf[256]; strncpy(buf,e,sizeof(buf)-1); buf[sizeof(buf)-1]=0;
+                char *tok = strtok(buf, ",;"); while(tok && s_nwatch<16) {
+                    s_watch[s_nwatch++] = (uint32)strtoul(tok,0,16) & 0xFFFFFFu; tok=strtok(0,",;"); } }
+        }
+        if (s_dw) for (int i=0;i<s_nwatch;i++) {
+            uint32_t w = s_watch[i] | (s_watch[i] ? 0 : 0);
+            if ((pc24 & 0xFFFFFFu) == s_watch[i]) {
+                if (s_n < 200) { s_n++;
+                    fprintf(stderr, "[dwatch] pc=$%06X mx=%u found=%d mirror=%d from=$%06X A=%04X X=%04X Y=%04X S=%04X DB=%02X hrv=%u\n",
+                        pc24, mx_idx, fp!=NULL, via_mirror, source_pc24,
+                        cpu->A, cpu->X, cpu->Y, cpu->S, cpu->DB, cpu->host_return_valid);
+                }
+            }
+        }
+    }
     /* SF_TRACE_BOOT: temporary boot-flow probe — log the first N cross-function
      * dispatches (target, source, hit, mx) to see exactly where the real boot
      * sequence stops/unwinds. Ungated (cpu_state.c is always compiled). */

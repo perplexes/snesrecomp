@@ -1184,6 +1184,9 @@ void cpu_trace_block_watch_check(CpuState *cpu, uint32_t pc24) {
 }
 
 void cpu_trace_block(CpuState *cpu, uint32_t pc24) {
+    /* (coverage moved to cpu_dispatch_pc_from: cpu_trace_block is a no-op
+     * inline stub without SNESRECOMP_TRACE, so a bitset here never runs in a
+     * Release build. The dispatch path is always compiled.) */
     /* Inspection-freeze trigger (reusable). Armed once from the
      * environment so it covers the very first frames with no
      * arming race; the TCP command can also set g_freeze_at_frame. */

@@ -191,6 +191,22 @@ void RecompStackPush(const char *name) {
       fprintf(stderr, "[call d%d] %s\n", g_recomp_stack_top, name);
     }
   }
+  /* SF_FUNC_WATCH=<substr[,substr...]>: log every function entry whose
+   * name contains any watched substring. Decisive "does routine X run" probe
+   * for the no-vision agent (works for direct C calls AND dispatches, since
+   * RecompStackPush fires at every entry). */
+  {
+    static int s_fw = -1; static char s_pats[8][40]; static int s_npats;
+    if (s_fw < 0) { const char *e = getenv("SF_FUNC_WATCH"); s_fw = e ? 1 : 0;
+      if (e) { char b[256]; strncpy(b,e,sizeof(b)-1); b[sizeof(b)-1]=0;
+        char *t=strtok(b,",;"); while(t && s_npats<8) { strncpy(s_pats[s_npats],t,39); s_pats[s_npats][39]=0; s_npats++; t=strtok(0,",;"); } } }
+    if (s_fw && name) {
+      for (int i=0;i<s_npats;i++) if (strstr(name, s_pats[i])) {
+        static int n=0; if (n++ < 400) fprintf(stderr, "[fwatch] %s (depth=%d S=%04x)\n", name, g_recomp_stack_top, 0);
+        break;
+      }
+    }
+  }
   /* SF_TRACE_STRAT: log entries to the player-setup / strat-dispatch path
    * (always-on; this push fires for every recompiled func). Matches both
    * symbol-named and address-named (bank_BB_AAAA) forms. */
