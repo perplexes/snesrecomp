@@ -406,7 +406,8 @@ def emit_function(rom: bytes, bank: int, start: int,
                   hle_dispatch=None,
                   reloc_regions=None,
                   inline_dispatch_loop_pcs: Optional[set] = None,
-                  entry_s_offset: int = 0) -> str:
+                  entry_s_offset: int = 0,
+                  force_host_return: bool = False) -> str:
     """Emit a complete v2 C function source for one 65816 function.
 
     Pipeline:
@@ -418,6 +419,10 @@ def emit_function(rom: bytes, bank: int, start: int,
         block-end op → goto / fall-through wiring
     """
     base_func_name = func_name if func_name is not None else _default_func_name(bank, start)
+    # force_host_return: set the per-function codegen flag so _emit_return
+    # emits a NORMAL host-return terminal for this function's RTS/RTL.
+    from v2.codegen import set_force_host_return
+    set_force_host_return(force_host_return)
     # HLE bypass: if cfg declared this function's PC as the SPC upload
     # entry (`hle_spc_upload <pc>` in the bank cfg), replace the entire
     # decoded body with a single RtlUploadSpcImageFromDp call. The

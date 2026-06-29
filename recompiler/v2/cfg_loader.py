@@ -430,6 +430,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 entry_mx: Optional[Tuple[int, int]] = None
                 entry_s_offset_val: int = 0
                 inline_skip_val: Optional[int] = None
+                force_host_return_val: bool = False
                 force_variants_val: Optional[List[Tuple[int, int]]] = None
                 for t in tokens[3:]:
                     if t.startswith('end:'):
@@ -527,6 +528,15 @@ def load_bank_cfg(path: str) -> BankCfg:
                             inline_skip_val = int(t[len('inline_skip:'):])
                         except ValueError:
                             pass
+                    elif t == 'force_host_return':
+                        # Terminal RTS/RTL always returns RECOMP_RETURN_NORMAL
+                        # (host return), bypassing the balanced-stack /
+                        # ancestor-skip / dispatch logic. For "exit epilogue"
+                        # functions reached via a computed dispatch whose
+                        # terminal return should unwind to the dispatch caller
+                        # rather than dispatch the popped PC (e.g. Star Fox's
+                        # map-script interpreter exit $03:E18A).
+                        force_host_return_val = True
                 be = BankEntry(
                     name=name, start=start, end=end,
                     tail_call_pc16=tail_call_pc16,
@@ -538,6 +548,8 @@ def load_bank_cfg(path: str) -> BankCfg:
                     be.inline_skip = inline_skip_val
                 if force_variants_val is not None:
                     be.force_variants = force_variants_val
+                if force_host_return_val:
+                    be.force_host_return = True
                 # Entry-mode seed. Explicit entry_mx: wins. Otherwise, strat
                 # functions (*_STRAT / *_ISTRAT) are reached via do_strat_l's
                 # runtime tjmp dispatch, which ALWAYS enters with m=1,x=0

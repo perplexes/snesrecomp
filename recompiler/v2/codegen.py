@@ -254,6 +254,18 @@ def _variant_suffix(m: int, x: int) -> str:
 # variant set (runtime dispatch emits one switch case per variant).
 _MX_VARIANTS = ((0, 0), (0, 1), (1, 0), (1, 1))
 
+# force_host_return: per-function flag (set by emit_function via
+# set_force_host_return before emitting each fn). When True, _emit_return
+# emits a terminal that always host-returns RECOMP_RETURN_NORMAL after
+# popping the HW return frame. For "exit epilogue" functions (cfg
+# `force_host_return`), e.g. Star Fox $03:E18A (interpreter exit).
+_G_FORCE_HOST_RETURN: bool = False
+
+
+def set_force_host_return(b: bool) -> None:
+    global _G_FORCE_HOST_RETURN
+    _G_FORCE_HOST_RETURN = bool(b)
+
 
 # Per-target surviving-(m, x) set, installed by v2_regen after its
 # emit-truth variant-prune pass. A function entered at a fixed width
@@ -1836,6 +1848,7 @@ def _emit_call(op: Call) -> List[str]:
 
 def _emit_return(op: Return) -> List[str]:
     """RTS / RTL / RTI emit. Reads + clears the function-LOCAL
+
     `_pending_skip` (set by an upstream NLR-pattern block on the same
     path) and returns its value. NORMAL paths get _pending_skip == 0
     == RECOMP_RETURN_NORMAL.
@@ -1908,6 +1921,33 @@ def _emit_return(op: Return) -> List[str]:
     label = "/* RTL */" if op.long else "/* RTS */"
     label_inner = "RTL" if op.long else "RTS"
     src24 = (op.source_pc24 or 0) & 0xFFFFFF
+    # force_host_return: this function is an "exit epilogue" whose terminal
+    # return should ALWAYS host-return (RECOMP_RETURN_NORMAL), unwinding to
+    # the dispatch caller. Used for functions like Star Fox's map-script
+    # interpreter exit ($03:E18A: PLB;PLP;RTL), reached via RTS from inside
+    # the interpreter loop; its RTL pops a JSL-resume whose ancestor frame
+    # ancestor-skip mis-matches, so the clean fix is to host-return. The HW
+    # return frame is still popped above (restoring the real caller's PC).
+    if _G_FORCE_HOST_RETURN:
+        pop_lines = [
+            "  uint16 _ret_s = cpu->S;",
+            "  cpu->S = (uint16)(cpu->S + 1);",
+            "  uint16 _rpcl = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+            "  cpu->S = (uint16)(cpu->S + 1);",
+            "  uint16 _rpch = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+        ]
+        if op.long:
+            pop_lines += [
+                "  cpu->S = (uint16)(cpu->S + 1);",
+                "  uint8 _rpb = cpu_read8(cpu, 0x00, cpu->S);",
+            ]
+        else:
+            pop_lines += ["  uint8 _rpb = cpu->PB;"]
+        pop_lines += [
+            "  (void)_rpcl; (void)_rpch; (void)_rpb; (void)_ret_s;",
+            "  return RECOMP_RETURN_NORMAL; }",
+        ]
+        return [f"{{ /* {label_inner} force_host_return: pop frame, host-return NORMAL */"] + pop_lines
     lines = [
         f"{{ uint16 _ret_s = cpu->S;  /* {label_inner} pop hardware return frame */",
         "  cpu->S = (uint16)(cpu->S + 1);",
