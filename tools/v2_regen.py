@@ -1359,6 +1359,18 @@ def main() -> int:
             addr = (bank << 16) | (entry.start & 0xFFFF)
             canonical_variants.setdefault(addr, set()).add(
                 (entry.entry_m & 1, entry.entry_x & 1))
+            # force_variants: cfg-declared extra (m,x) widths for a target
+            # reached by a DYNAMIC resume (runtime indirect RTL/JMP) the
+            # static analysis can't see. Add to BOTH the canonical
+            # (never-pruned) set and the discovered-variants set (seeded
+            # above at line ~1188), so the prune pass keeps them and the
+            # clone logic (below) emits their bodies + wires the dispatch
+            # table. Without this the dispatch slot stays NULL -> miss.
+            fv = getattr(entry, 'force_variants', None)
+            if fv:
+                for (em, ex) in fv:
+                    canonical_variants.setdefault(addr, set()).add((em & 1, ex & 1))
+                    variants.setdefault(addr, set()).add((em & 1, ex & 1))
 
     # Apply per-(m,x) variants to existing cfg entries: for each cfg
     # entry whose target address has more than its declared (m, x)

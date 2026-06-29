@@ -430,6 +430,7 @@ def load_bank_cfg(path: str) -> BankCfg:
                 entry_mx: Optional[Tuple[int, int]] = None
                 entry_s_offset_val: int = 0
                 inline_skip_val: Optional[int] = None
+                force_variants_val: Optional[List[Tuple[int, int]]] = None
                 for t in tokens[3:]:
                     if t.startswith('end:'):
                         try:
@@ -483,6 +484,29 @@ def load_bank_cfg(path: str) -> BankCfg:
                                 entry_mx = (int(parts[0]) & 1, int(parts[1]) & 1)
                         except (ValueError, IndexError):
                             pass
+                    elif t.startswith('force_variants:'):
+                        # Per-function extra (m,x) variants to force-generate.
+                        # Format: force_variants:M,X[;M,X] (each 0/1). Adds the
+                        # named widths to BOTH the canonical (never-pruned) set
+                        # and the discovered-variants (body-generating) set, so
+                        # the prune pass keeps them and the clone logic emits
+                        # their bodies + wires the dispatch table. For targets
+                        # reached by a DYNAMIC resume (runtime indirect
+                        # RTL/JMP) whose (m,x) the static analysis can't see;
+                        # without it, the non-canonical width is pruned as
+                        # "wrong-width" and the dispatch slot stays NULL -> miss.
+                        try:
+                            raw = t[len('force_variants:'):]
+                            parsed_pairs = []
+                            for pair in raw.split(';'):
+                                pv = pair.split(',')
+                                if len(pv) == 2:
+                                    parsed_pairs.append(
+                                        (int(pv[0]) & 1, int(pv[1]) & 1))
+                            if parsed_pairs:
+                                force_variants_val = parsed_pairs
+                        except (ValueError, IndexError):
+                            pass
                     elif t.startswith('entry_s_offset:'):
                         try:
                             entry_s_offset_val = int(t[len('entry_s_offset:'):])
@@ -512,6 +536,8 @@ def load_bank_cfg(path: str) -> BankCfg:
                     be.exit_mx = exit_mx
                 if inline_skip_val is not None:
                     be.inline_skip = inline_skip_val
+                if force_variants_val is not None:
+                    be.force_variants = force_variants_val
                 # Entry-mode seed. Explicit entry_mx: wins. Otherwise, strat
                 # functions (*_STRAT / *_ISTRAT) are reached via do_strat_l's
                 # runtime tjmp dispatch, which ALWAYS enters with m=1,x=0

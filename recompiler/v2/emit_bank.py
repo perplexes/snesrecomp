@@ -66,6 +66,18 @@ class BankEntry:
     # (_hrv && _ret_s == _entry_s) fires correctly.  Default 0 (no
     # adjustment).  Set via cfg `entry_s_offset:<n>` on a func line.
     entry_s_offset: int = 0
+    # force_variants: extra (m, x) entry variants to force-generate for this
+    # function, beyond what static variant-discovery finds. Use for targets
+    # reached by a DYNAMIC resume the static analysis can't see (e.g. Star
+    # Fox's do_strat_l protothread resume: an indirect RTL to a runtime RAM
+    # resume-PC whose (m,x) width isn't statically discoverable). Without
+    # this, the prune pass drops the non-canonical width as "wrong-width
+    # garbage" and the dispatch table's variant[idx] slot stays NULL ->
+    # the dynamic resume becomes a dispatch miss (skipped). Set via cfg
+    # `force_variants:M,X[;M,X]` on a func line; v2_regen adds each pair to
+    # BOTH the canonical (never-pruned) set and the discovered-variants
+    # (body-generating) set. None = no extra variants (default).
+    force_variants: Optional[list] = None
 
 
 def emit_bank(rom: bytes, bank: int,
