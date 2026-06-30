@@ -171,8 +171,9 @@ pub enum IROp {
     // Increment / decrement of memory (no carry-in; sets Z/N; leaves C/V)
     IncMem { seg: SegRef, width: u8, delta: i8 },
 
-    // BIT — sets N V Z based on operand & A
-    BitTest { operand: Value, width: u8 },
+    // BIT — sets N V Z from operand & A (memory form). imm=true (BIT #immediate)
+    // sets ONLY Z; N and V are untouched (65816 quirk).
+    BitTest { operand: Value, width: u8, imm: bool },
     // TSB — set bits in memory
     BitSetMem { seg: SegRef, width: u8 },
     // TRB — clear bits in memory

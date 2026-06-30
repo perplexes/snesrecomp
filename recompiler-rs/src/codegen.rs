@@ -572,20 +572,25 @@ fn emit_incmem(seg: &SegRef, width: u8, delta_i: i8) -> Vec<String> {
     lines
 }
 
-fn emit_bittest(operand: Value, width: u8) -> Vec<String> {
+fn emit_bittest(operand: Value, width: u8, imm: bool) -> Vec<String> {
     let sign = widths::sign_bit(width);
     let overflow = widths::overflow_bit(width);
     let ct = widths::ctype(width);
     let a_m = widths::masked("cpu->A", width);
     let operand_m = widths::masked(&v(operand), width);
-    vec![
+    let mut lines = vec![
         "{".to_string(),
         format!("  {ct} _bt = ({ct})({a_m} & {operand_m});"),
         "  cpu->_flag_Z = (_bt == 0) ? 1 : 0;".to_string(),
-        format!("  cpu->_flag_N = (({operand_m} & {sign}) != 0) ? 1 : 0;"),
-        format!("  cpu->_flag_V = (({operand_m} & {overflow}) != 0) ? 1 : 0;"),
-        "}".to_string(),
-    ]
+    ];
+    // BIT #immediate sets ONLY Z; N/V untouched (65816 quirk). Memory forms set
+    // N/V from operand bits 7/6. (Found by phase_b_gen flag-byte diff.)
+    if !imm {
+        lines.push(format!("  cpu->_flag_N = (({operand_m} & {sign}) != 0) ? 1 : 0;"));
+        lines.push(format!("  cpu->_flag_V = (({operand_m} & {overflow}) != 0) ? 1 : 0;"));
+    }
+    lines.push("}".to_string());
+    lines
 }
 
 fn emit_bitsetmem(seg: &SegRef, width: u8) -> Vec<String> {
@@ -1659,7 +1664,7 @@ pub fn emit_op(
         IROp::Shift { op, src, width, out } => emit_shift(*op, *src, *width, *out),
         IROp::IncReg { reg: r, delta } => emit_increg(*r, *delta),
         IROp::IncMem { seg, width, delta } => emit_incmem(seg, *width, *delta),
-        IROp::BitTest { operand, width } => emit_bittest(*operand, *width),
+        IROp::BitTest { operand, width, imm } => emit_bittest(*operand, *width, *imm),
         IROp::BitSetMem { seg, width } => emit_bitsetmem(seg, *width),
         IROp::BitClearMem { seg, width } => emit_bitclearmem(seg, *width),
         IROp::SetFlag { flag, value } => emit_setflag(*flag, *value),

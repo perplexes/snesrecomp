@@ -837,14 +837,20 @@ def _emit_bittest(op: BitTest) -> List[str]:
     ctype = widths.ctype(op.width)
     a_m = widths.masked("cpu->A", op.width)
     operand_m = widths.masked(_v(op.operand), op.width)
-    return [
+    lines = [
         "{",
         f"  {ctype} _bt = ({ctype})({a_m} & {operand_m});",
         f"  cpu->_flag_Z = (_bt == 0) ? 1 : 0;",
-        f"  cpu->_flag_N = (({operand_m} & {sign}) != 0) ? 1 : 0;",
-        f"  cpu->_flag_V = (({operand_m} & {overflow}) != 0) ? 1 : 0;",
-        "}",
     ]
+    # BIT #immediate sets ONLY Z; N and V are untouched (65816 quirk). The memory
+    # forms set N/V from operand bits 7/6. (Found by phase_b_gen flag-byte diff.)
+    if not getattr(op, "imm", False):
+        lines += [
+            f"  cpu->_flag_N = (({operand_m} & {sign}) != 0) ? 1 : 0;",
+            f"  cpu->_flag_V = (({operand_m} & {overflow}) != 0) ? 1 : 0;",
+        ]
+    lines.append("}")
+    return lines
 
 
 def _emit_bitsetmem(op: BitSetMem) -> List[str]:

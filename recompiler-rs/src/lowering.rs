@@ -163,14 +163,14 @@ pub fn lower(insn: &Insn, vf: &mut ValueFactory) -> Vec<IROp> {
                 let rhs = vf.next();
                 vec![
                     IROp::ConstI { value: insn.operand as i64, width, out: rhs },
-                    IROp::BitTest { operand: rhs, width },
+                    IROp::BitTest { operand: rhs, width, imm: true },
                 ]
             } else {
                 let seg = segref_for(insn);
                 let rhs = vf.next();
                 vec![
                     IROp::Read { seg, width, out: rhs },
-                    IROp::BitTest { operand: rhs, width },
+                    IROp::BitTest { operand: rhs, width, imm: false },
                 ]
             }
         }
