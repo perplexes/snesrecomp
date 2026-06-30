@@ -277,6 +277,14 @@ static inline void cpu_write_y_x(CpuState *cpu, uint16 v) {
 static inline void cpu_p_to_mirrors(CpuState *cpu) {
     cpu->m_flag  = (cpu->P & CPU_P_M) ? 1 : 0;
     cpu->x_flag  = (cpu->P & CPU_P_X) ? 1 : 0;
+    /* 65816: setting the X (index-width) flag forces the index registers'
+     * high bytes to $00 — and they stay 0 while x=1 (you can't load them).
+     * Masking on every P->mirror sync where x=1 is therefore equivalent to the
+     * hardware 0->1-transition clear and idempotent. Without this, a
+     * `ldx #$02ff; txs; sep #$30` idiom leaves X=$02FF in storage; when code
+     * later returns to 16-bit index (rep) the stale high byte corrupts X.
+     * (Found via lockstep diff vs bsnes at $1F:BDBE during Star Fox boot.) */
+    if (cpu->x_flag) { cpu->X &= 0xFFu; cpu->Y &= 0xFFu; }
     cpu->_flag_C = (cpu->P & CPU_P_C) ? 1 : 0;
     cpu->_flag_Z = (cpu->P & CPU_P_Z) ? 1 : 0;
     cpu->_flag_I = (cpu->P & CPU_P_I) ? 1 : 0;
