@@ -6,11 +6,20 @@
 //!
 //! Usage:
 //!   chase-misses --misses /tmp/sf_misses.txt --cfg-dir recomp [--symbols SYMBOLS.TXT] [--apply]
+//!   chase-misses ... --explain --rom sf.sfc   # self-diagnose each miss (ADDITIVE output)
+//!
+//! `--explain` appends a per-miss diagnosis AFTER the normal plan (the default
+//! output stays byte-for-byte identical to the Python tool): it decodes the
+//! target, classifies it code-vs-data, names the dispatch source's enclosing
+//! symbol, and flags a target outside the source strat's registered resume-PC
+//! cluster — the signature of a garbage continuation pointer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use regex::Regex;
+use snesrecomp_regen::insn::{decode_insn, validate_decoded_insns, Insn};
+use snesrecomp_regen::rom::load_rom;
 
 // Whitelisted coroutine-dispatcher SOURCE ranges (24-bit PC of the dispatch RTL).
 // A miss is a genuine resume iff its `from=` falls in one of these.
@@ -130,6 +139,76 @@ fn flag_val(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
 }
 
+// ── --explain helpers ─────────────────────────────────────────────────────────
+
+/// Miss `mx` code → (m, x): mx is `(m<<1)|x` (mx=2 == M1X0).
+fn mx_to_mx(mx: u32) -> (u8, u8) {
+    (((mx >> 1) & 1) as u8, (mx & 1) as u8)
+}
+
+/// Decode up to 8 insns at (bank, pc16) under (m, x). Returns disasm lines and a
+/// "looks like real code" verdict (a clean run that passes validate_decoded_insns
+/// and doesn't immediately hit an unknown opcode / BRK / COP).
+fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    let mut insns: Vec<Insn> = Vec::new();
+    let mut cur = pc16 & 0xFFFF;
+    let mut unknown = false;
+    for _ in 0..8 {
+        if !(0x8000..=0xFFFF).contains(&cur) {
+            break;
+        }
+        let off = ((bank & 0x7F) as usize) * 0x8000 + (cur as usize - 0x8000);
+        if off >= rom.len() {
+            break;
+        }
+        match decode_insn(rom, off, cur, bank, m, x) {
+            Some(ins) => {
+                let n = ins.length as usize;
+                let raw: String = (0..n).map(|i| format!("{:02X} ", rom[off + i])).collect();
+                lines.push(format!("    ${:02X}:{:04X}: {:<11} {}", bank, cur, raw.trim_end(), ins.mnem));
+                cur = (cur + ins.length as u32) & 0xFFFF;
+                insns.push(ins);
+            }
+            None => {
+                lines.push(format!("    ${:02X}:{:04X}: ?? {:02X} (unknown opcode)", bank, cur, rom[off]));
+                unknown = true;
+                break;
+            }
+        }
+    }
+    let looks_code = !unknown && !insns.is_empty() && validate_decoded_insns(&insns);
+    (lines, looks_code)
+}
+
+/// Parse `func <name> <hexoff> …` entries from a bank cfg → (name, offset).
+fn cfg_funcs(cfg_path: &Path) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let Ok(text) = std::fs::read_to_string(cfg_path) else {
+        return out;
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("func ") {
+            let mut it = rest.split_whitespace();
+            if let (Some(name), Some(off)) = (it.next(), it.next()) {
+                if let Ok(o) = u32::from_str_radix(off, 16) {
+                    out.push((name.to_string(), o & 0xFFFF));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Strip a `_R<hex>` resume suffix to get the base strat name.
+fn strat_base(name: &str) -> &str {
+    name.rsplit_once("_R")
+        .filter(|(_, suf)| suf.len() >= 3 && suf.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|(b, _)| b)
+        .unwrap_or(name)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -140,6 +219,8 @@ fn main() {
     let symbols_path = flag_val(&args, "--symbols")
         .unwrap_or_else(|| "SYMBOLS.TXT".to_string());
     let apply = args.contains(&"--apply".to_string());
+    let explain = args.contains(&"--explain".to_string());
+    let rom_path = flag_val(&args, "--rom");
 
     // Strat-family symbol allowlist: same pattern as Python's STRAT_NAME_RE.
     // re.IGNORECASE → (?i); ^ and $ in alternation match start/end of text.
@@ -244,6 +325,67 @@ fn main() {
                 "    ${:06X} mx={} from=${:06X}  ({})",
                 s.tgt, s.mx, s.src, s.why
             );
+        }
+    }
+
+    // --explain: ADDITIVE per-miss diagnosis (default output above is unchanged).
+    if explain {
+        let rom = rom_path.as_ref().and_then(|p| load_rom(p).ok());
+        println!("\n== --explain: per-miss diagnosis ==");
+        if rom.is_none() {
+            println!("  (pass --rom <game.sfc> to decode targets)");
+        }
+        // dedup misses by (canon target, src) preserving first-seen order
+        let mut seen = HashSet::new();
+        for &(tgt, mx, src) in &misses {
+            let ctgt = canon_bank(tgt);
+            if !seen.insert((ctgt, src)) {
+                continue;
+            }
+            let (m, x) = mx_to_mx(mx);
+            let bank = (ctgt >> 16) & 0xFF;
+            let off = ctgt & 0xFFFF;
+            let src_sym = nearest_sym(&syms, canon_bank(src));
+            let tgt_sym = nearest_sym(&syms, ctgt);
+            let routed = is_dispatcher(src).is_some() && mx == 2;
+            println!(
+                "\n  ${:06X} (mx={} → M{}X{})  from ${:06X}  [{}]",
+                ctgt, mx, m, x, src,
+                if routed { "would route" } else { "QUARANTINED" }
+            );
+            if let Some((a, n)) = src_sym {
+                println!("    source: in {} (+${:X})  dispatcher={}", n, canon_bank(src).wrapping_sub(a),
+                    is_dispatcher(src).unwrap_or("no — not a whitelisted coroutine dispatcher"));
+            }
+            if let Some((a, n)) = tgt_sym {
+                println!("    target: near {} (+${:X})", n, ctgt.wrapping_sub(a));
+            }
+            // resume-cluster check: does the source strat's resume PCs bracket this target?
+            if let Some((_, sname)) = src_sym {
+                let base = strat_base(sname);
+                let cfg = format!("{}/bank{:02x}.cfg", cfg_dir, bank);
+                let cluster: Vec<u32> = cfg_funcs(Path::new(&cfg))
+                    .into_iter()
+                    .filter(|(n, _)| strat_base(n) == base)
+                    .map(|(_, o)| o)
+                    .collect();
+                if let (Some(&lo), Some(&hi)) = (cluster.iter().min(), cluster.iter().max()) {
+                    let inside = off >= lo && off <= hi;
+                    println!(
+                        "    cluster: {}'s {} resume PCs span ${:04X}-${:04X} — target ${:04X} is {}",
+                        base, cluster.len(), lo, hi, off,
+                        if inside { "INSIDE (plausible resume)" } else { "OUTSIDE (likely a garbage pointer)" }
+                    );
+                }
+            }
+            // decode probe
+            if let Some(rom) = &rom {
+                let (lines, looks_code) = decode_probe(rom, bank, off, m, x);
+                println!("    decode @ target ({}):", if looks_code { "looks like CODE" } else { "looks like DATA / garbage" });
+                for l in lines {
+                    println!("  {}", l);
+                }
+            }
         }
     }
 
