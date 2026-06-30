@@ -86,6 +86,17 @@ def _capture(i):
 
 LOROM_RESET = 0x8000   # code entry = $00:8000 = file offset 0
 
+# Scratch WRAM region for memory-read snippets: $00:0010..$00:003F seeded so
+# byte[a] == a. Both the oracle ROM and the recomp harness seed it identically,
+# so a DP / DP-indexed read lands the same value IFF the address computation
+# matches hardware — the register/flag compare then catches address bugs.
+SCRATCH_LO, SCRATCH_HI = 0x10, 0x40
+# emulation-mode (reset state, 8-bit) seed loop: for x in $10..$40: $00,x = x
+_SEED_SCRATCH = bytes([0xA2, SCRATCH_LO,        # ldx #$10
+                       0x8A, 0x95, 0x00, 0xE8,  # txa; sta $00,x; inx
+                       0xE0, SCRATCH_HI,         # cpx #$40
+                       0xD0, 0xF8])              # bne -8
+
 def _finalize_rom(code: bytearray):
     """Place code at $00:8000, append a bra-self trap, write LoROM header+vectors.
     Returns (rom_bytes, trap_pc24)."""
@@ -104,13 +115,14 @@ def _finalize_rom(code: bytearray):
 
 def build_snippet_rom(snippet: bytes, init: dict):
     """One snippet per ROM; final state read from the DUMP at the trap."""
-    code = bytearray(_prologue(init)); code += snippet
+    code = bytearray(_SEED_SCRATCH); code += _prologue(init); code += snippet
     return _finalize_rom(code)
 
 def build_batch_rom(cases):
     """Many (snippet, init) per ROM: each runs prologue -> snippet -> capture,
-    storing A/X/Y/P to a per-snippet result block. One bsnes boot for N snippets."""
-    code = bytearray()
+    storing A/X/Y/P to a per-snippet result block. One bsnes boot for N snippets.
+    Snippets only READ scratch (no writes in the palette), so one seed suffices."""
+    code = bytearray(_SEED_SCRATCH)
     for i, (snip, init) in enumerate(cases):
         code += _prologue(init); code += snip; code += _capture(i)
     return _finalize_rom(code)

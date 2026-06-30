@@ -2,14 +2,15 @@
 """phase_b_gen.py — generate random 65816 snippets and differential-fuzz them
 against the bsnes oracle (phase_b machinery).
 
-Palette is register/width/ALU/shift/flag ops with immediate operands — no memory,
-no branches, no stack — so every snippet runs clean in the WRAM-only harness and
-exercises exactly the width/flag/mirror logic where recomp codegen bugs live (the
-class the index-high-byte bug belonged to). M/X is tracked as the sequence is
-built so immediates get the correct width on both sides. Deterministic per --seed.
+Default (reg) mode: register/width/ALU/shift/flag ops with immediates — no memory,
+exercising the width/flag/mirror logic where codegen bugs live. --mem mode: DP-read
+addressing into a seeded scratch region (D=0, no D-movers or indexed reads) so every
+read lands in WRAM and the register/flag compare catches address-computation bugs.
+M/X is tracked so immediates get the right width. Deterministic per --seed.
+--batch N runs N snippets per bsnes boot (the throughput unlock).
 
 Usage:
-  python phase_b_gen.py --count 24 [--seed 1] [--len 8] [--verbose]
+  python phase_b_gen.py --count 30 [--seed 1] [--len 8] [--mem] [--batch 30]
 """
 from __future__ import annotations
 import argparse, random, sys, pathlib
@@ -31,23 +32,49 @@ PALETTE = [
     (0x18, "impl", "CLC"), (0x38, "impl", "SEC"), (0xB8, "impl", "CLV"),
     (0xEA, "impl", "NOP"),
     (0xC2, "wid", "REP"), (0xE2, "wid", "SEP"),
+    # memory reads from the seeded scratch region ($10..$3F). The loaded value /
+    # flags land in registers, so the register+P compare catches address-comp bugs
+    # (DP, DP-indexed wrap, index-width in the effective address).
+    (0xA5, "dp", "LDA $dp"), (0x65, "dp", "ADC $dp"), (0xE5, "dp", "SBC $dp"),
+    (0x25, "dp", "AND $dp"), (0x05, "dp", "ORA $dp"), (0x45, "dp", "EOR $dp"),
+    (0xC5, "dp", "CMP $dp"), (0x24, "dp", "BIT $dp"),
+    (0xA6, "dp", "LDX $dp"), (0xA4, "dp", "LDY $dp"),
+    (0xE4, "dp", "CPX $dp"), (0xC4, "dp", "CPY $dp"),
+    (0xB5, "dpx", "LDA $dp,X"), (0x75, "dpx", "ADC $dp,X"), (0x35, "dpx", "AND $dp,X"),
+    (0x55, "dpx", "EOR $dp,X"), (0xD5, "dpx", "CMP $dp,X"), (0xB4, "dpx", "LDY $dp,X"),
 ]
 
-def gen_snippet(rng, length):
-    """Return (bytes, init, disasm[]). Tracks m/x for immediate widths."""
+# Ops that move the effective DP base (D) or use an uncontrolled index — they can
+# push a memory read out of WRAM scratch into MMIO ($00:2000+), where the
+# flat-buffer recomp harness and bsnes legitimately differ. Excluded from --mem.
+_MEM_UNSAFE_MNEM = {"TCD", "TDC"}     # change D
+_MEM_UNSAFE_KIND = {"dpx"}            # index could exceed scratch -> MMIO
+
+def gen_snippet(rng, length, mem=False):
+    """Return (bytes, init, disasm[]). Tracks m/x for immediate widths.
+    mem=False: register/width/flag/ALU palette, NO memory (the broad default).
+    mem=True:  DP-read addressing, D pinned 0, no D-movers / indexed reads, so
+               every read lands in the seeded scratch and stays comparable."""
+    if mem:
+        palette = [p for p in PALETTE if p[1] != "dpx" and p[2] not in _MEM_UNSAFE_MNEM]
+    else:
+        palette = [p for p in PALETTE if p[1] not in ("dp", "dpx")]
     init = {"A": rng.randint(0, 0xFFFF), "X": rng.randint(0, 0xFFFF),
             "Y": rng.randint(0, 0xFFFF), "DB": rng.randint(0, 0xFF),
+            "D": 0,  # D held 0 so DP reads land in the seeded scratch
             "m": rng.randint(0, 1), "x": rng.randint(0, 1)}
     m, x = init["m"], init["x"]
     out, dis = bytearray(), []
     for _ in range(length):
-        op, kind, mnem = rng.choice(PALETTE)
+        op, kind, mnem = rng.choice(palette)
         if kind == "A":
             if m: out += bytes([op, rng.randint(0, 0xFF)]); dis.append(f"{mnem} #imm8")
             else: v = rng.randint(0, 0xFFFF); out += bytes([op, v & 0xFF, v >> 8]); dis.append(f"{mnem} #imm16")
         elif kind == "I":
             if x: out += bytes([op, rng.randint(0, 0xFF)]); dis.append(f"{mnem} #imm8")
             else: v = rng.randint(0, 0xFFFF); out += bytes([op, v & 0xFF, v >> 8]); dis.append(f"{mnem} #imm16")
+        elif kind in ("dp", "dpx"):
+            out += bytes([op, rng.randint(0x10, 0x3F)]); dis.append(mnem)
         elif kind == "wid":
             mask = rng.choice([0x10, 0x20, 0x30])
             out += bytes([op, mask]); dis.append(f"{mnem} #${mask:02X}")
@@ -77,13 +104,14 @@ def main():
     ap.add_argument("--count", type=int, default=24)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--len", type=int, default=8)
+    ap.add_argument("--mem", action="store_true", help="memory-addressing mode (DP reads, D=0, clean scratch)")
     ap.add_argument("--batch", type=int, default=0,
                     help="snippets per bsnes boot (0=one-per-boot). Batched is ~Nx faster.")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    print(f"phase_b_gen: {a.count} snippets, seed={a.seed}, len={a.len}, batch={a.batch}")
-    cases = [gen_snippet(rng, a.len) for _ in range(a.count)]   # (snip, init, dis)
+    print(f"phase_b_gen: {a.count} snippets, seed={a.seed}, len={a.len}, batch={a.batch}, mode={'mem' if a.mem else 'reg'}")
+    cases = [gen_snippet(rng, a.len, mem=a.mem) for _ in range(a.count)]   # (snip, init, dis)
     fails = noora = 0
     dbox = [0]
 

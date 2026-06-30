@@ -79,6 +79,7 @@ static uint8 build_p(int m,int x){ return (uint8)((m?0x20:0)|(x?0x10:0)); }
 
 int main(void){
     CpuState _cpu; CpuState *cpu = &_cpu; memset(cpu,0,sizeof *cpu); cpu->ram=g_ram;
+    for(int a=0x10;a<0x40;a++) g_ram[a]=(uint8_t)a;   /* scratch seed: byte[a]=a (matches the oracle ROM) */
     cpu->A=A0; cpu->X=X0; cpu->Y=Y0; cpu->D=D0; cpu->DB=DB0;
     cpu->P=build_p(M0,X0F); cpu_p_to_mirrors(cpu);
     RUN_BODY
