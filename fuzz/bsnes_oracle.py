@@ -34,12 +34,22 @@ def _imm16(op, v): return bytes([op, v & 0xFF, (v >> 8) & 0xFF])
 def _imm8(op, v):  return bytes([op, v & 0xFF])
 
 def _prologue(init):
-    """Seed registers + mode from immediates. Native mode throughout."""
+    """Seed registers + mode + flags from immediates. Native mode throughout.
+
+    The full P byte is set LAST via PEA+PLP — PEA pushes a 16-bit immediate
+    touching no register and no flag, and PLP pulls the low byte into P — so the
+    final flag state is exactly P = (m,x bits, all data flags 0), matching the
+    recomp harness's `cpu->P = build_p(m,x); cpu_p_to_mirrors`. Critically this
+    avoids `clc; xce` leaving C=1 (XCE swaps carry with the emulation flag), which
+    otherwise diverges every carry-dependent op from the recomp's C=0 seed.
+    Registers are seeded 16-bit; if x=1, PLP clears X/Y high on hardware exactly as
+    cpu_p_to_mirrors does on the recomp side."""
     A  = init.get("A", 0); X = init.get("X", 0); Y = init.get("Y", 0)
     D  = init.get("D", 0); DB = init.get("DB", 0)
     m  = init.get("m", 0); x = init.get("x", 0)
+    P  = (0x20 if m else 0) | (0x10 if x else 0)   # data flags 0
     b = bytearray()
-    b += bytes([0x18, 0xFB])                 # clc, xce  -> native (e=0)
+    b += bytes([0x18, 0xFB])                 # clc, xce  -> native (e=0); C now =old E
     b += bytes([0xC2, 0x30])                 # rep #$30  -> 16-bit A/X/Y
     b += _imm16(0xA9, D); b += bytes([0x5B]) # lda #D; tcd
     b += bytes([0xE2, 0x20])                 # sep #$20  -> 8-bit A (for plb)
@@ -48,11 +58,8 @@ def _prologue(init):
     b += _imm16(0xA9, A)                     # lda #A
     b += _imm16(0xA2, X)                     # ldx #X
     b += _imm16(0xA0, Y)                     # ldy #Y
-    # set final mode: SEP the bits that should be 1, REP the bits that should be 0.
-    set_bits   = (0x20 if m else 0) | (0x10 if x else 0)
-    clear_bits = (0x20 if not m else 0) | (0x10 if not x else 0)
-    if set_bits:   b += bytes([0xE2, set_bits])    # sep
-    if clear_bits: b += bytes([0xC2, clear_bits])  # rep (only the index/mem bits)
+    b += _imm16(0xF4, P | (P << 8))          # pea #PP (no reg/flag side effects)
+    b += bytes([0x28])                       # plp  -> P = low byte; sets m/x + flags
     return bytes(b)
 
 LOROM_RESET = 0x8000   # code entry = $00:8000 = file offset 0
