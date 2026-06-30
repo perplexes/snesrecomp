@@ -1164,7 +1164,11 @@ def _emit_transfer(op: Transfer) -> List[str]:
         ]
     # Determine destination width from controlling flag.
     if op.dst == Reg.A:
-        flag = "cpu->m_flag"
+        # TDC (D->A) and TSC (S->A) transfer the FULL 16-bit C regardless of the
+        # M flag — only TXA/TYA respect m-width. Treating them as m-width left the
+        # accumulator high byte stale in m=1 (found by phase_b_gen differential
+        # fuzz vs bsnes: `TDC; LDA #imm8` gave A=$06c4 vs hardware $00c4).
+        flag = None if op.src in (Reg.D, Reg.S) else "cpu->m_flag"
     elif op.dst in (Reg.X, Reg.Y):
         flag = "cpu->x_flag"
     elif op.dst == Reg.D or op.dst == Reg.S:
