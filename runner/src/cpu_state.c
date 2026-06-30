@@ -585,6 +585,29 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
             }
         }
     }
+    /* SF_STATE_AT=<hex24>[:<wram_hex>]: when a dispatch's SOURCE or TARGET pc24
+     * matches, dump the full CpuState (regs + m/x) plus an optional WRAM word.
+     * The recomp-side counterpart to bsnes-plus SF_BSNES_DUMP_AT, for lockstep
+     * state diffing of computed coroutine resumes (e.g. is X / the loaded DP
+     * word the recomp feeds an `adc`-built pointer the same as the real game?). */
+    {
+        static int s_sa = -1; static uint32_t s_pc = 0, s_wa = 0; static int s_n = 0;
+        if (s_sa < 0) {
+            const char *e = getenv("SF_STATE_AT");
+            s_sa = e ? 1 : 0;
+            if (e) { s_pc = (uint32)strtoul(e, NULL, 16) & 0xFFFFFFu;
+                const char *c = strchr(e, ':'); if (c) s_wa = (uint32)strtoul(c + 1, NULL, 16) & 0xFFFF; }
+        }
+        if (s_sa && s_n < 100 &&
+            (((pc24 & 0xFFFFFFu) == s_pc) || ((source_pc24 & 0xFFFFFFu) == s_pc))) {
+            s_n++;
+            uint16 w = (uint16)(cpu->ram[s_wa & 0x1FFFF] | (cpu->ram[(s_wa + 1) & 0x1FFFF] << 8));
+            fprintf(stderr,
+                "[state] tgt=$%06X from=$%06X  A=%04X X=%04X Y=%04X S=%04X D=%04X DB=%02X PB=%02X m=%d x=%d  ram[$%04X]=%04X\n",
+                pc24, source_pc24, cpu->A, cpu->X, cpu->Y, cpu->S, cpu->D, cpu->DB, cpu->PB,
+                cpu->m_flag, cpu->x_flag, s_wa, w);
+        }
+    }
     /* SF_TRACE_BOOT: temporary boot-flow probe — log the first N cross-function
      * dispatches (target, source, hit, mx) to see exactly where the real boot
      * sequence stops/unwinds. Ungated (cpu_state.c is always compiled). */
