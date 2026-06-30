@@ -2,3 +2,5 @@ snippets/
 results.db
 build/
 results/
+coverage.json
+*.coverage.json
