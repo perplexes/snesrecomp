@@ -131,6 +131,13 @@ _DUMP_RE = re.compile(
     r"DUMP @ \$([0-9A-Fa-f]+)\s+A:([0-9A-Fa-f]+) X:([0-9A-Fa-f]+) Y:([0-9A-Fa-f]+) "
     r"S:([0-9A-Fa-f]+) DB:([0-9A-Fa-f]+) P:([0-9A-Fa-f]+)")
 
+def _cleanup(rompath):
+    """Remove a temp ROM and its -trace.log (NamedTemporaryFile is delete=False,
+    so these must be reaped — hundreds of fuzz runs otherwise fill /tmp)."""
+    for p in (rompath, str(pathlib.Path("/tmp") / (pathlib.Path(rompath).stem + "-trace.log"))):
+        try: os.remove(p)
+        except OSError: pass
+
 def run_oracle(rom: bytes, trap_pc: int, mem_addr: int | None = None, secs: int = 12):
     """Run the snippet ROM on bsnes; return final {A,X,Y,S,DB,P,(mem)}."""
     subprocess.run(["pkill", "-9", "bsnes"], capture_output=True); time.sleep(0.6)
@@ -152,6 +159,7 @@ def run_oracle(rom: bytes, trap_pc: int, mem_addr: int | None = None, secs: int 
     txt = ""
     for cand in (log, pathlib.Path(TRACE_LOG)):
         if cand.exists(): txt = cand.read_text(errors="replace"); break
+    _cleanup(rompath)
     m = _DUMP_RE.search(txt)
     if not m:
         return None
@@ -181,6 +189,7 @@ def run_oracle_batch(rom: bytes, trap_pc: int, n: int, secs: int = 14):
                    env=env, cwd=BSNES_DIR, capture_output=True)
     log = pathlib.Path("/tmp") / (pathlib.Path(rompath).stem + "-trace.log")
     txt = log.read_text(errors="replace") if log.exists() else ""
+    _cleanup(rompath)
     m = _RANGE_RE.search(txt)
     if not m:
         return None
@@ -195,6 +204,59 @@ def run_oracle_batch(rom: bytes, trap_pc: int, n: int, secs: int = 14):
                     "Y": b[4] | (b[5] << 8), "P": P, "DB": b[7],
                     "m": (P >> 5) & 1, "x": (P >> 4) & 1})
     return out
+
+
+_VHF_RE = re.compile(
+    r"^\s*([0-9A-Fa-f]{6})\b.*?V:\s*(-?\d+)\s+H:\s*(-?\d+)\s+F:\s*(-?\d+)")
+
+def _master(v, h, f):
+    # NTSC: 262 lines/frame * 1364 master/line; trace H is hdot (1 dot = 4 master).
+    return f * (262 * 1364) + v * 1364 + h * 4
+
+def measure_cycles(snippet: bytes, init: dict, secs: int = 12):
+    """MASTER-cycle cost of the snippet on bsnes, from the per-instruction regtrace
+    (V/H/F deltas between the snippet's first instruction and the trap). Returns
+    the master-cycle delta, or None on failure.
+
+    NOTE (why there is no strict --cycles fuzz mode): this is MASTER cycles, which
+    do NOT convert cleanly to the recomp's CPU-cycle estimate. The master/CPU ratio
+    varies per opcode (slow ROM fetches = 8, fast WRAM/internal = 6, so an
+    instruction's ratio depends on its access mix, ~7.1-7.7 observed). Recovering
+    CPU cycles would require modelling each opcode's access speeds — as much work as
+    the cycle table itself. And the recomp's cycle model is a deliberate PROPORTIONAL
+    estimate (it omits page-cross / DP-align / branch / DMA penalties; see
+    cycle_tables.py). So a cycle differential is inherently fuzzy, not the crisp
+    bug-finder the register/flag diff is. Kept as a rough utility for spot checks /
+    a future access-speed-modelled cycle audit, not a gate."""
+    rom, trap = build_snippet_rom(snippet, init)
+    start_pc = (LOROM_RESET + len(_SEED_SCRATCH) + len(_prologue(init))) & 0xFFFF
+    subprocess.run(["pkill", "-9", "bsnes"], capture_output=True); time.sleep(0.6)
+    with tempfile.NamedTemporaryFile(suffix=".sfc", delete=False, dir="/tmp") as f:
+        f.write(rom); rompath = f.name
+    env = dict(os.environ)
+    env.update({"SF_BSNES_WRAM_INIT": "00", "SF_BSNES_REGTRACE": "1",
+                "SF_BSNES_REGTRACE_LO": "000000", "SF_BSNES_REGTRACE_HI": "00FFFF",
+                "SDL_VIDEODRIVER": "x11", "QT_QPA_PLATFORM": "xcb", "DISPLAY": ":0"})
+    subprocess.run(["timeout", "-s", "KILL", str(secs), BSNES, rompath],
+                   env=env, cwd=BSNES_DIR, capture_output=True)
+    log = pathlib.Path("/tmp") / (pathlib.Path(rompath).stem + "-trace.log")
+    if not log.exists():
+        _cleanup(rompath); return None
+    txt = log.read_text(errors="replace"); _cleanup(rompath)
+    m_start = m_trap = None
+    for ln in txt.splitlines():
+        mm = _VHF_RE.match(ln)
+        if not mm:
+            continue
+        pc = int(mm.group(1), 16) & 0xFFFF
+        clk = _master(int(mm.group(2)), int(mm.group(3)), int(mm.group(4)))
+        if pc == start_pc and m_start is None:
+            m_start = clk
+        elif pc == (trap & 0xFFFF) and m_start is not None and m_trap is None:
+            m_trap = clk; break
+    if m_start is None or m_trap is None:
+        return None
+    return m_trap - m_start
 
 
 if __name__ == "__main__":

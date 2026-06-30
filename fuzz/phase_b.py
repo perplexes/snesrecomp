@@ -51,6 +51,32 @@ def emit_snippet_body(rom: bytes, m0: int, x0: int) -> list[str]:
     return lines
 
 
+def decode_snippet(rom: bytes, m0: int, x0: int):
+    """Decode a straight-line snippet into the insn list (m/x tracked)."""
+    insns, off, pc, m, x = [], 0, 0x8000, m0, x0
+    while off < len(rom):
+        insn = s65.decode_insn(rom, off, pc, 0, m=m, x=x)
+        if insn is None:
+            raise ValueError(f"decode fail at off {off} byte {rom[off]:#04x}")
+        insn.m_flag, insn.x_flag = m, x
+        insns.append(insn)
+        if insn.mnem == "REP":
+            if insn.operand & 0x20: m = 0
+            if insn.operand & 0x10: x = 0
+        elif insn.mnem == "SEP":
+            if insn.operand & 0x20: m = 1
+            if insn.operand & 0x10: x = 1
+        off += insn.length; pc = (pc + insn.length) & 0xFFFF
+    return insns
+
+def recomp_cycle_estimate(snippet: bytes, init: dict) -> int:
+    """The recomp's CPU-cycle estimate for the snippet (sum of the cycle table,
+    under its stated assumptions: DP.low=0, no page-cross, no taken branch)."""
+    from v2.cycle_tables import estimate_cycles
+    return sum(estimate_cycles(i) for i in
+               decode_snippet(snippet, init.get("m", 0), init.get("x", 0)))
+
+
 HARNESS = r"""
 #include <stdio.h>
 #include <stdint.h>
