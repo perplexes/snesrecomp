@@ -969,6 +969,11 @@ fn emit_transfer(src: Reg, dst: Reg) -> Vec<String> {
         ];
     }
     let flag: Option<&str> = match dst {
+        // TDC (D->A) and TSC (S->A) transfer the full 16-bit C regardless of the
+        // M flag — only TXA/TYA respect m-width. Treating them as m-width leaves
+        // the accumulator high byte stale in m=1. (Parity with v2/codegen.py;
+        // found by phase_b_gen differential fuzz vs bsnes.)
+        Reg::A if src == Reg::D || src == Reg::S => None,
         Reg::A => Some("cpu->m_flag"),
         Reg::X | Reg::Y => Some("cpu->x_flag"),
         _ => None,
