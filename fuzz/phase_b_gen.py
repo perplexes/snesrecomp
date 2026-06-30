@@ -62,44 +62,59 @@ def gen_snippet(rng, length):
     return bytes(out), init, dis
 
 
+def report(i, init, dis, snip, diffs, diverged_box, verbose):
+    if diffs:
+        diverged_box[0] += 1
+        print(f"#{i:03d} DIVERGE  init={{m:{init['m']} x:{init['x']} A:{init['A']:04X} X:{init['X']:04X} Y:{init['Y']:04X}}}")
+        print(f"        snippet: {' ; '.join(dis)}")
+        print(f"        bytes:   {snip.hex()}")
+        print(f"        {' '.join(diffs)}")
+    elif verbose:
+        print(f"#{i:03d} OK   {' ; '.join(dis)}")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=24)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--len", type=int, default=8)
+    ap.add_argument("--batch", type=int, default=0,
+                    help="snippets per bsnes boot (0=one-per-boot). Batched is ~Nx faster.")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     rng = random.Random(a.seed)
+    print(f"phase_b_gen: {a.count} snippets, seed={a.seed}, len={a.len}, batch={a.batch}")
+    cases = [gen_snippet(rng, a.len) for _ in range(a.count)]   # (snip, init, dis)
+    fails = noora = 0
+    dbox = [0]
 
-    print(f"phase_b_gen: {a.count} snippets, seed={a.seed}, len={a.len}")
-    fails = diverged = noora = 0
-    for i in range(a.count):
-        snip, init, dis = gen_snippet(rng, a.len)
-        rec = phase_b.run_recomp(snip, init)
-        if "error" in rec:
-            print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; continue
-        rom, trap = bsnes_oracle.build_snippet_rom(snip, init)
-        ora = bsnes_oracle.run_oracle(rom, trap)
-        if ora is None:
-            noora += 1
-            if a.verbose: print(f"#{i:03d} NO-ORACLE")
-            continue
-        def norm(st):
-            st = dict(st)
-            if st.get("x") == 1: st["X"] &= 0xFF; st["Y"] &= 0xFF
-            if st.get("m") == 1: st["A"] &= 0xFFFF  # A keeps B; compare full
-            return st
-        r, o = norm(rec), norm(ora)
-        diffs = [f"{k}:rec={r.get(k):#x}!=ora={o.get(k):#x}"
-                 for k in phase_b.FIELDS if r.get(k) != o.get(k)]
-        if diffs:
-            diverged += 1
-            print(f"#{i:03d} DIVERGE  init={{m:{init['m']} x:{init['x']} A:{init['A']:04X} X:{init['X']:04X} Y:{init['Y']:04X}}}")
-            print(f"        snippet: {' ; '.join(dis)}")
-            print(f"        bytes:   {snip.hex()}")
-            print(f"        {' '.join(diffs)}")
-        elif a.verbose:
-            print(f"#{i:03d} OK   {' ; '.join(dis)}")
+    if a.batch > 0:
+        # per-snippet recomp (fast) + one bsnes boot per group of --batch snippets
+        for g in range(0, a.count, a.batch):
+            grp = cases[g:g + a.batch]
+            recs = [phase_b.run_recomp(s, ini) for (s, ini, _) in grp]
+            rom, trap = bsnes_oracle.build_batch_rom([(s, ini) for (s, ini, _) in grp])
+            oras = bsnes_oracle.run_oracle_batch(rom, trap, len(grp))
+            if oras is None:
+                noora += len(grp); print(f"group @{g}: NO-ORACLE (batch dump failed)"); continue
+            for j, ((snip, init, dis), rec, ora) in enumerate(zip(grp, recs, oras)):
+                i = g + j
+                if "error" in rec:
+                    print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; continue
+                report(i, init, dis, snip, phase_b.compare(rec, ora), dbox, a.verbose)
+    else:
+        for i, (snip, init, dis) in enumerate(cases):
+            rec = phase_b.run_recomp(snip, init)
+            if "error" in rec:
+                print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; continue
+            rom, trap = bsnes_oracle.build_snippet_rom(snip, init)
+            ora = bsnes_oracle.run_oracle(rom, trap)
+            if ora is None:
+                noora += 1
+                if a.verbose: print(f"#{i:03d} NO-ORACLE")
+                continue
+            report(i, init, dis, snip, phase_b.compare(rec, ora), dbox, a.verbose)
+
+    diverged = dbox[0]
     print(f"\nran {a.count}: {diverged} diverged, {fails} builderr, {noora} no-oracle, "
           f"{a.count - diverged - fails - noora} OK")
     return 1 if (diverged or fails) else 0

@@ -82,6 +82,7 @@ int main(void){
     cpu->A=A0; cpu->X=X0; cpu->Y=Y0; cpu->D=D0; cpu->DB=DB0;
     cpu->P=build_p(M0,X0F); cpu_p_to_mirrors(cpu);
     RUN_BODY
+    cpu_mirrors_to_p(cpu);   /* canonicalize P from the mirror flags the runtime branches on */
     printf("{\"A\":%u,\"X\":%u,\"Y\":%u,\"S\":%u,\"D\":%u,\"DB\":%u,\"P\":%u,\"m\":%u,\"x\":%u}\n",
         cpu->A,cpu->X,cpu->Y,cpu->S,cpu->D,cpu->DB,cpu->P,cpu->m_flag,cpu->x_flag);
     return 0;
@@ -122,9 +123,33 @@ CORPUS = [
      "rom":bytes([0xC2,0x30, 0xA2,0x55,0x77, 0xE2,0x30, 0xC2,0x10])},  # narrow then widen
 ]
 
-# D omitted: the bsnes DUMP header doesn't carry direct page. A/X/Y/DB/m/x cover
-# the register-width / flag-transition bug classes this fuzz targets.
-FIELDS = ["A","X","Y","DB","m","x"]
+# Register fields compared directly. D is omitted (bsnes DUMP has no direct page);
+# the flag byte P is compared separately (it subsumes m/x). I (0x04) is masked out
+# — neither side exercises interrupts and it is never meaningful here.
+REG_FIELDS = ["A", "X", "Y", "DB"]
+PMASK = 0xFF & ~0x04   # N V m x D - Z C
+
+def _norm(st):
+    """Mask only the bytes hardware makes invisible. In 8-bit index mode (x=1) the
+    index high byte reads as 0. The accumulator high byte (B) is NOT masked — it
+    stays architecturally visible via XBA/TDC even in m=1 (the TDC bug lived there),
+    so a stale B is a real divergence, not noise."""
+    st = dict(st)
+    if st.get("x") == 1:
+        st["X"] &= 0xFF; st["Y"] &= 0xFF
+    return st
+
+def compare(rec, ora):
+    """Return a list of human-readable divergence strings (empty = match)."""
+    r, o = _norm(rec), _norm(ora)
+    diffs = [f"{k}:rec={r.get(k):#x}!=ora={o.get(k):#x}"
+             for k in REG_FIELDS if r.get(k) != o.get(k)]
+    if (r.get("P", 0) & PMASK) != (o.get("P", 0) & PMASK):
+        diffs.append(f"P:rec={r.get('P',0)&PMASK:#04x}!=ora={o.get('P',0)&PMASK:#04x}")
+    return diffs
+
+# back-compat alias
+FIELDS = REG_FIELDS
 
 def main():
     print(f"{'case':<34} {'result':<8} divergences")
@@ -137,14 +162,7 @@ def main():
         ora = bsnes_oracle.run_oracle(rom, trap)
         if ora is None:
             print(f"{c['id']:<34} NO-ORACLE (bsnes/DISPLAY?)"); continue
-        # mask index high byte when x=1 (architecturally hidden — both sides agree there)
-        def norm(st):
-            st = dict(st)
-            if st.get("x")==1:
-                st["X"]&=0xFF; st["Y"]&=0xFF
-            return st
-        r, o = norm(rec), norm(ora)
-        diffs = [f"{k}:rec={r.get(k):#x}!=ora={o.get(k):#x}" for k in FIELDS if r.get(k)!=o.get(k)]
+        diffs = compare(rec, ora)
         status = "OK" if not diffs else "DIVERGE"
         if diffs: fails+=1
         print(f"{c['id']:<34} {status:<8} {' '.join(diffs)}")
