@@ -53,16 +53,18 @@ _MEM_UNSAFE_KIND = {"dpx"}            # index could exceed scratch -> MMIO
 def gen_snippet(rng, length, mem=False):
     """Return (bytes, init, disasm[]). Tracks m/x for immediate widths.
     mem=False: register/width/flag/ALU palette, NO memory (the broad default).
-    mem=True:  DP-read addressing, D pinned 0, no D-movers / indexed reads, so
-               every read lands in the seeded scratch and stays comparable."""
+    mem=True:  DP and DP,X addressing into the seeded scratch. To keep every
+               effective address inside WRAM (never MMIO), x is pinned to 1 (8-bit
+               index, so dp<=$3F + X<=$FF <= $13E), D pinned 0, D-movers excluded,
+               and REP may not clear x (only its m bit)."""
     if mem:
-        palette = [p for p in PALETTE if p[1] != "dpx" and p[2] not in _MEM_UNSAFE_MNEM]
+        palette = [p for p in PALETTE if p[2] not in _MEM_UNSAFE_MNEM]
     else:
         palette = [p for p in PALETTE if p[1] not in ("dp", "dpx")]
-    init = {"A": rng.randint(0, 0xFFFF), "X": rng.randint(0, 0xFFFF),
+    init = {"A": rng.randint(0, 0xFFFF), "X": rng.randint(0, 0xFF if mem else 0xFFFF),
             "Y": rng.randint(0, 0xFFFF), "DB": rng.randint(0, 0xFF),
             "D": 0,  # D held 0 so DP reads land in the seeded scratch
-            "m": rng.randint(0, 1), "x": rng.randint(0, 1)}
+            "m": rng.randint(0, 1), "x": 1 if mem else rng.randint(0, 1)}
     m, x = init["m"], init["x"]
     out, dis = bytearray(), []
     for _ in range(length):
@@ -76,7 +78,10 @@ def gen_snippet(rng, length, mem=False):
         elif kind in ("dp", "dpx"):
             out += bytes([op, rng.randint(0x10, 0x3F)]); dis.append(mnem)
         elif kind == "wid":
-            mask = rng.choice([0x10, 0x20, 0x30])
+            # in mem mode REP must not clear x (would let a 16-bit index escape to
+            # MMIO); allow only its m bit. SEP is fine (it only sets bits).
+            masks = ([0x20] if (mem and op == 0xC2) else [0x10, 0x20, 0x30])
+            mask = rng.choice(masks)
             out += bytes([op, mask]); dis.append(f"{mnem} #${mask:02X}")
             if op == 0xC2:  # REP -> clear
                 if mask & 0x20: m = 0

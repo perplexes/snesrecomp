@@ -86,16 +86,21 @@ def _capture(i):
 
 LOROM_RESET = 0x8000   # code entry = $00:8000 = file offset 0
 
-# Scratch WRAM region for memory-read snippets: $00:0010..$00:003F seeded so
-# byte[a] == a. Both the oracle ROM and the recomp harness seed it identically,
-# so a DP / DP-indexed read lands the same value IFF the address computation
-# matches hardware — the register/flag compare then catches address bugs.
-SCRATCH_LO, SCRATCH_HI = 0x10, 0x40
-# emulation-mode (reset state, 8-bit) seed loop: for x in $10..$40: $00,x = x
-_SEED_SCRATCH = bytes([0xA2, SCRATCH_LO,        # ldx #$10
-                       0x8A, 0x95, 0x00, 0xE8,  # txa; sta $00,x; inx
-                       0xE0, SCRATCH_HI,         # cpx #$40
-                       0xD0, 0xF8])              # bne -8
+# Scratch WRAM region seeded so byte[a] == (a & 0xFF), $00:0010..$00:0141. Both
+# the oracle ROM and the recomp harness seed it identically, so a DP / DP-indexed
+# read lands the same value IFF the address computation matches hardware — the
+# register/flag compare then catches address bugs. The range reaches $141 so an
+# x=1 (8-bit index) DP,X read (dp<=$3F + X<=$FF -> <=$13E, +1 for 16-bit) stays in
+# seeded WRAM and never touches MMIO ($00:2000+).
+SCRATCH_LO, SCRATCH_HI = 0x10, 0x142
+# native 16-bit-X / 8-bit-A seed loop: for x in $0010..$0142: byte[x] = x & 0xFF
+_SEED_SCRATCH = bytes([0x18, 0xFB,              # clc; xce -> native
+                       0xC2, 0x10,              # rep #$10 (16-bit X)
+                       0xE2, 0x20,              # sep #$20 (8-bit A)
+                       0xA2, 0x10, 0x00,        # ldx #$0010
+                       0x8A, 0x9D, 0x00, 0x00,  # txa; sta $0000,x
+                       0xE8, 0xE0, 0x42, 0x01,  # inx; cpx #$0142
+                       0xD0, 0xF6])             # bne -10
 
 def _finalize_rom(code: bytearray):
     """Place code at $00:8000, append a bra-self trap, write LoROM header+vectors.
