@@ -137,6 +137,30 @@ int cpu_resolve_ancestor_skip(uint16_t ret_s) {
       fprintf(stderr, "]\n");
     }
   }
+  /* SF_SKIP_TRACE: name the function whose RTL resolves a (>=2) ancestor-skip,
+   * the skip count, ret_s, and the target ancestor frame — so the FIRST emitter
+   * of a SKIP_N is identified AT ITS SOURCE, not where it leaks (e.g. past
+   * I_RESET). A resolution to/below the stack root is flagged: that is the
+   * signature of a corrupt ret_s (a garbage continuation pointer popped by an
+   * RTL) coincidentally matching a deep ancestor's entry_s. */
+  {
+    static int s_st = -1, s_n = 0;
+    if (s_st < 0) s_st = getenv("SF_SKIP_TRACE") ? 1 : 0;
+    if (s_st && _found >= 2 && s_n < 200) {
+      s_n++;
+      int ai = (top - 1) - _found;  /* target ancestor stack index */
+      const char *cur = (top >= 1 && top <= RECOMP_STACK_DEPTH)
+                          ? g_recomp_stack[top - 1] : "?";
+      const char *anc = (ai >= 0 && ai < RECOMP_STACK_DEPTH)
+                          ? g_recomp_stack[ai] : "(below root)";
+      fprintf(stderr,
+              "[skip] SKIP_%d from %s (ret_s=%04x) -> ancestor[%d] %s%s\n",
+              _found, cur ? cur : "?", ret_s, ai, anc ? anc : "?",
+              (ai <= 0)
+                ? "  <-- resolves to/below root (corrupt ret_s? garbage RTL pop)"
+                : "");
+    }
+  }
   return _found;
 }
 
