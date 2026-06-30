@@ -176,6 +176,7 @@ extern uint8_t       g_db_watch_set;       /* bitmask: bit N set => watch DB == 
 extern uint32_t      g_db_watch_bits[8];
 
 void cpu_trace_block(CpuState *cpu, uint32_t pc24);
+void cpu_block_trace_emit(CpuState *cpu, uint32_t pc24);  /* SF_BLOCK_TRACE (always compiled) */
 void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name);
 void cpu_trace_event(CpuState *cpu, uint32_t pc24, uint8_t event_type,
                      uint8_t extra0, uint16_t extra1);
@@ -1313,7 +1314,13 @@ void cpu_trace_dump_wram(const char *tag, int scan_n);
 
 #else  /* SNESRECOMP_TRACE = 0 */
 
-static inline void cpu_trace_block(CpuState *cpu, uint32_t pc24)            { (void)cpu; (void)pc24; }
+/* SF_BLOCK_TRACE hook — always compiled (defined in cpu_trace.c outside the
+ * SNESRECOMP_TRACE guard) so block-state tracing works in Release builds. The
+ * g_block_trace_on gate (set once at load) keeps the off-path to a global-load
+ * + branch per block. */
+extern int g_block_trace_on;
+void cpu_block_trace_emit(CpuState *cpu, uint32_t pc24);
+static inline void cpu_trace_block(CpuState *cpu, uint32_t pc24)            { if (g_block_trace_on) cpu_block_trace_emit(cpu, pc24); }
 static inline void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) { (void)cpu; (void)pc24; (void)name; }
 static inline void cpu_trace_event(CpuState *cpu, uint32_t pc24, uint8_t et,
                                    uint8_t e0, uint16_t e1)                 { (void)cpu; (void)pc24; (void)et; (void)e0; (void)e1; }

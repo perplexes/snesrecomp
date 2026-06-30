@@ -1214,6 +1214,7 @@ void cpu_trace_block(CpuState *cpu, uint32_t pc24) {
     }
     if (g_freeze_capture) return;
     capture(cpu, pc24, CPU_TR_BLOCK, 0, 0);
+    cpu_block_trace_emit(cpu, pc24);  /* SF_BLOCK_TRACE (always-compiled helper) */
 #if SNESRECOMP_TRACE
     dbg_oam_block_trace(cpu, pc24);  /* task #7 PC-range block path trace */
 #endif
@@ -2554,3 +2555,49 @@ void cpu_trace_dump_dbpb(const char *tag) {
 }
 
 #endif /* SNESRECOMP_TRACE */
+
+/* ---- SF_BLOCK_TRACE: always-compiled (works in Release, where the rest of
+ * cpu_trace.c is #if'd out and cpu_trace_block is a no-op inline stub). Streams
+ * (block PC + architectural state) one line per block entry for lockstep
+ * divergence-diffing against bsnes-plus SF_BSNES_REGTRACE via
+ * tools/lockstep_diff.py. Block entry is the right granularity: intra-block the
+ * recomp folds/reorders lazy flags, but at block boundaries A/X/Y/S/P/D/DB must
+ * match hardware. Called from the no-op stub (Release) and the real
+ * cpu_trace_block (trace build). Optional SF_BLOCK_TRACE_LO/HI window the pc24
+ * range (keeps the trace bounded); SF_BLOCK_TRACE_MEM=<hex16> appends a bank-00
+ * WRAM word so a memory cell can be diffed alongside the registers. */
+#include <stdio.h>
+#include <stdlib.h>
+/* Gate read once at load so the Release hot path pays only a global-load+branch
+ * per block when the feature is off (the stub in cpu_trace.h tests this). */
+int g_block_trace_on = 0;
+__attribute__((constructor)) static void cpu_block_trace_init(void) {
+    const char *p = getenv("SF_BLOCK_TRACE");
+    g_block_trace_on = (p && *p) ? 1 : 0;
+}
+void cpu_block_trace_emit(CpuState *cpu, uint32_t pc24) {
+    static int s_bt = -1; static FILE *s_f = (FILE *)0;
+    static uint32_t s_lo = 0, s_hi = 0xFFFFFFu, s_mem = 0xFFFFFFFFu;
+    if (s_bt < 0) {
+        const char *p = getenv("SF_BLOCK_TRACE");
+        s_bt = (p && *p) ? 1 : 0;
+        if (s_bt) {
+            s_f = fopen(p, "w");
+            const char *lo = getenv("SF_BLOCK_TRACE_LO"); if (lo) s_lo = (uint32_t)strtoul(lo, 0, 16) & 0xFFFFFFu;
+            const char *hi = getenv("SF_BLOCK_TRACE_HI"); if (hi) s_hi = (uint32_t)strtoul(hi, 0, 16) & 0xFFFFFFu;
+            const char *m  = getenv("SF_BLOCK_TRACE_MEM"); if (m) s_mem = (uint32_t)strtoul(m, 0, 16) & 0xFFFF;
+            if (!s_f) s_bt = 0;
+        }
+    }
+    if (s_bt && s_f && pc24 >= s_lo && pc24 <= s_hi) {
+        if (s_mem != 0xFFFFFFFFu) {
+            uint16_t w = (uint16_t)(cpu->ram[s_mem & 0x1FFFF] | (cpu->ram[(s_mem + 1) & 0x1FFFF] << 8));
+            fprintf(s_f, "%06X A:%04X X:%04X Y:%04X S:%04X D:%04X DB:%02X P:%02X m:%d x:%d M%04X:%04X\n",
+                    pc24, cpu->A, cpu->X, cpu->Y, cpu->S, cpu->D, cpu->DB, cpu->P, cpu->m_flag, cpu->x_flag, s_mem & 0xFFFF, w);
+        } else {
+            fprintf(s_f, "%06X A:%04X X:%04X Y:%04X S:%04X D:%04X DB:%02X P:%02X m:%d x:%d\n",
+                    pc24, cpu->A, cpu->X, cpu->Y, cpu->S, cpu->D, cpu->DB, cpu->P, cpu->m_flag, cpu->x_flag);
+        }
+        fflush(s_f);
+    }
+}
