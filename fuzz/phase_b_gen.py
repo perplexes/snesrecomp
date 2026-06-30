@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse, random, sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import phase_b, bsnes_oracle
+import coverage as _cov
 
 # opcode, kind. kind drives operand width: 'A'=m-width imm, 'I'=x-width imm,
 # 'impl'=no operand, 'wid'=REP/SEP (operand is the mask).
@@ -112,6 +113,7 @@ def main():
     ap.add_argument("--mem", action="store_true", help="memory-addressing mode (DP reads, D=0, clean scratch)")
     ap.add_argument("--batch", type=int, default=0,
                     help="snippets per bsnes boot (0=one-per-boot). Batched is ~Nx faster.")
+    ap.add_argument("--ledger", default="", help="coverage-ledger JSON to accumulate into + report")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     rng = random.Random(a.seed)
@@ -119,9 +121,18 @@ def main():
     cases = [gen_snippet(rng, a.len, mem=a.mem) for _ in range(a.count)]   # (snip, init, dis)
     fails = noora = 0
     dbox = [0]
+    led = _cov.Ledger(a.ledger) if a.ledger else None
+
+    def handle(i, snip, init, dis, rec, ora):
+        nonlocal fails
+        if "error" in rec:
+            print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; return
+        diffs = phase_b.compare(rec, ora)
+        report(i, init, dis, snip, diffs, dbox, a.verbose)
+        if led is not None:
+            led.record(phase_b.decode_snippet(snip, init["m"], init["x"]), not diffs)
 
     if a.batch > 0:
-        # per-snippet recomp (fast) + one bsnes boot per group of --batch snippets
         for g in range(0, a.count, a.batch):
             grp = cases[g:g + a.batch]
             recs = [phase_b.run_recomp(s, ini) for (s, ini, _) in grp]
@@ -130,26 +141,26 @@ def main():
             if oras is None:
                 noora += len(grp); print(f"group @{g}: NO-ORACLE (batch dump failed)"); continue
             for j, ((snip, init, dis), rec, ora) in enumerate(zip(grp, recs, oras)):
-                i = g + j
-                if "error" in rec:
-                    print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; continue
-                report(i, init, dis, snip, phase_b.compare(rec, ora), dbox, a.verbose)
+                handle(g + j, snip, init, dis, rec, ora)
     else:
         for i, (snip, init, dis) in enumerate(cases):
             rec = phase_b.run_recomp(snip, init)
-            if "error" in rec:
-                print(f"#{i:03d} BUILDERR {rec.get('stderr','')[:160]}"); fails += 1; continue
             rom, trap = bsnes_oracle.build_snippet_rom(snip, init)
             ora = bsnes_oracle.run_oracle(rom, trap)
-            if ora is None:
+            if ora is None and "error" not in rec:
                 noora += 1
                 if a.verbose: print(f"#{i:03d} NO-ORACLE")
                 continue
-            report(i, init, dis, snip, phase_b.compare(rec, ora), dbox, a.verbose)
+            handle(i, snip, init, dis, rec, ora)
 
     diverged = dbox[0]
     print(f"\nran {a.count}: {diverged} diverged, {fails} builderr, {noora} no-oracle, "
           f"{a.count - diverged - fails - noora} OK")
+    if led is not None:
+        led.save()
+        pal = ([p for p in PALETTE if p[2] not in _MEM_UNSAFE_MNEM] if a.mem
+               else [p for p in PALETTE if p[1] not in ("dp", "dpx")])
+        led.report(pal)
     return 1 if (diverged or fails) else 0
 
 
