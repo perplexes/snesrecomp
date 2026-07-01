@@ -155,9 +155,12 @@ fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> DecodeProbe {
     let mut cur = pc16 & 0xFFFF;
     let (mut cm, mut cx) = (m, x);   // track width across REP/SEP within the fragment
     let mut unknown = false;
-    let mut returns_in: Option<usize> = None; // insns until the first RTL/RTS/RTI
-    // A manufactured-RTL coroutine resume is a short self-contained fragment that
-    // reaches a return (RTL/RTS/RTI) — decode until the first return (max 24 insns).
+    let mut returns_in: Option<usize> = None; // insns until the first unconditional transfer
+    // A coroutine/strat resume is a short self-contained fragment that reaches an
+    // unconditional control-flow point — a return (RTL/RTS/RTI) OR an unconditional
+    // jump (JMP/JML/BRA/BRL) — WITHOUT falling through into data. Decode until that
+    // point (max 24 insns); decoding past it would spill into unrelated bytes and
+    // spuriously fail validation (the $04:A32C false-'garbage').
     for i in 0..24 {
         if !(0x8000..=0xFFFF).contains(&cur) { break; }
         let off = ((bank & 0x7F) as usize) * 0x8000 + (cur as usize - 0x8000);
@@ -167,7 +170,7 @@ fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> DecodeProbe {
                 let n = ins.length as usize;
                 let raw: String = (0..n).map(|k| format!("{:02X} ", rom[off + k])).collect();
                 lines.push(format!("    ${:02X}:{:04X}: {:<11} {}", bank, cur, raw.trim_end(), ins.mnem));
-                let is_ret = matches!(ins.mnem, "RTL" | "RTS" | "RTI");
+                let is_ret = matches!(ins.mnem, "RTL" | "RTS" | "RTI" | "JMP" | "JML" | "BRA" | "BRL");
                 // advance width so a REP/SEP-led resume fragment decodes correctly
                 match ins.mnem {
                     "REP" => { if ins.operand & 0x20 != 0 { cm = 0; } if ins.operand & 0x10 != 0 { cx = 0; } }
@@ -486,8 +489,8 @@ fn main() {
                 let terminates = p.returns_in.is_some();
                 if src_is_rtl && p.looks_code && terminates {
                     let sub = src_sym.map(|(_, n)| strat_base(n)).unwrap_or_else(|| "STRAT".into());
-                    println!("    VERDICT: REGISTERABLE manufactured-RTL resume (clean code, \
-                              returns via RTL, from a coroutine dispatcher). Add to bank{:02x}.cfg:", bank);
+                    println!("    VERDICT: REGISTERABLE resume (clean code reaching a return/uncond \
+                              jump, from a coroutine/strat dispatcher). Add to bank{:02x}.cfg:", bank);
                     println!("      func {}_R{:04X} {:04X} entry_mx:{},{}   # {} resume", sub, off, off, m, x, sub);
                 } else if src_is_rtl && p.looks_code && !terminates {
                     println!("    VERDICT: SUSPICIOUS — clean code but no RTL/RTS in window; \
