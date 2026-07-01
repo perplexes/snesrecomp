@@ -1046,7 +1046,17 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
        * never equals an arbitrary target, so the CPU spins forever.
        * Return an advancing line (0..261, wrapping) so any target is
        * reached within one frame of polls. */
-      if(ppu->latchAutoAdvance) {
+      extern uint64_t g_master_cycles; extern int g_cycle_accurate;
+      if(g_cycle_accurate) {
+        /* Cycle-accurate: latch the REAL beam derived from the master-cycle
+         * counter (262 lines/frame * 1364 master/line; 4 master/dot). Because the
+         * master counter advances as the spin-loop body executes, OPVCT/OPHCT
+         * advance at the correct rate and the busy-waits exit at the same
+         * game-moment as hardware — instead of the +1/read approximation. */
+        uint64_t m = g_master_cycles;
+        ppu->vCount = (uint16_t)((m / 1364) % 262);
+        ppu->hCount = (uint16_t)((m % 1364) / 4);
+      } else if(ppu->latchAutoAdvance) {
         ppu->vCount = ppu->latchLine;
         ppu->latchLine = (ppu->latchLine + 1) > 261 ? 0 : (ppu->latchLine + 1);
         /* Star Fox also busy-waits on OPHCT ($213C) for the beam to reach a
