@@ -149,26 +149,34 @@ fn mx_to_mx(mx: u32) -> (u8, u8) {
 /// Decode up to 8 insns at (bank, pc16) under (m, x). Returns disasm lines and a
 /// "looks like real code" verdict (a clean run that passes validate_decoded_insns
 /// and doesn't immediately hit an unknown opcode / BRK / COP).
-fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> (Vec<String>, bool) {
+fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> DecodeProbe {
     let mut lines = Vec::new();
     let mut insns: Vec<Insn> = Vec::new();
     let mut cur = pc16 & 0xFFFF;
+    let (mut cm, mut cx) = (m, x);   // track width across REP/SEP within the fragment
     let mut unknown = false;
-    for _ in 0..8 {
-        if !(0x8000..=0xFFFF).contains(&cur) {
-            break;
-        }
+    let mut returns_in: Option<usize> = None; // insns until the first RTL/RTS/RTI
+    // A manufactured-RTL coroutine resume is a short self-contained fragment that
+    // reaches a return (RTL/RTS/RTI) — decode until the first return (max 24 insns).
+    for i in 0..24 {
+        if !(0x8000..=0xFFFF).contains(&cur) { break; }
         let off = ((bank & 0x7F) as usize) * 0x8000 + (cur as usize - 0x8000);
-        if off >= rom.len() {
-            break;
-        }
-        match decode_insn(rom, off, cur, bank, m, x) {
+        if off >= rom.len() { break; }
+        match decode_insn(rom, off, cur, bank, cm, cx) {
             Some(ins) => {
                 let n = ins.length as usize;
-                let raw: String = (0..n).map(|i| format!("{:02X} ", rom[off + i])).collect();
+                let raw: String = (0..n).map(|k| format!("{:02X} ", rom[off + k])).collect();
                 lines.push(format!("    ${:02X}:{:04X}: {:<11} {}", bank, cur, raw.trim_end(), ins.mnem));
+                let is_ret = matches!(ins.mnem, "RTL" | "RTS" | "RTI");
+                // advance width so a REP/SEP-led resume fragment decodes correctly
+                match ins.mnem {
+                    "REP" => { if ins.operand & 0x20 != 0 { cm = 0; } if ins.operand & 0x10 != 0 { cx = 0; } }
+                    "SEP" => { if ins.operand & 0x20 != 0 { cm = 1; } if ins.operand & 0x10 != 0 { cx = 1; } }
+                    _ => {}
+                }
                 cur = (cur + ins.length as u32) & 0xFFFF;
                 insns.push(ins);
+                if is_ret { returns_in = Some(i + 1); break; }
             }
             None => {
                 lines.push(format!("    ${:02X}:{:04X}: ?? {:02X} (unknown opcode)", bank, cur, rom[off]));
@@ -178,8 +186,10 @@ fn decode_probe(rom: &[u8], bank: u32, pc16: u32, m: u8, x: u8) -> (Vec<String>,
         }
     }
     let looks_code = !unknown && !insns.is_empty() && validate_decoded_insns(&insns);
-    (lines, looks_code)
+    DecodeProbe { lines, looks_code, returns_in }
 }
+
+struct DecodeProbe { lines: Vec<String>, looks_code: bool, returns_in: Option<usize> }
 
 /// Parse `func <name> <hexoff> …` entries from a bank cfg → (name, offset).
 fn cfg_funcs(cfg_path: &Path) -> Vec<(String, u32)> {
@@ -378,12 +388,34 @@ fn main() {
                     );
                 }
             }
-            // decode probe
+            // decode probe + INTRINSIC resume classification (no chicken-and-egg
+            // cluster bracket: a first-of-its-kind resume is OUTSIDE the 1-entry
+            // cluster yet still registerable).
             if let Some(rom) = &rom {
-                let (lines, looks_code) = decode_probe(rom, bank, off, m, x);
-                println!("    decode @ target ({}):", if looks_code { "looks like CODE" } else { "looks like DATA / garbage" });
-                for l in lines {
-                    println!("  {}", l);
+                let p = decode_probe(rom, bank, off, m, x);
+                println!("    decode @ target ({}{}):",
+                    if p.looks_code { "looks like CODE" } else { "looks like DATA / garbage" },
+                    match p.returns_in { Some(k) => format!(", RTL/RTS-terminated in {k} insns"),
+                                         None => ", no return in window".to_string() });
+                for l in &p.lines { println!("  {}", l); }
+                // Verdict: a manufactured-RTL resume is (source = coroutine dispatcher)
+                // AND (target decodes clean) AND (target is a self-contained fragment
+                // that returns via RTL/RTS/RTI). Those three are intrinsic — they do
+                // NOT depend on the target already being bracketed by registered
+                // resumes (the flaw that mis-called $04:E97E "garbage").
+                let src_is_rtl = is_dispatcher(src).is_some();
+                let terminates = p.returns_in.is_some();
+                if src_is_rtl && p.looks_code && terminates {
+                    let sub = src_sym.map(|(_, n)| strat_base(n)).unwrap_or_else(|| "STRAT".into());
+                    println!("    VERDICT: REGISTERABLE manufactured-RTL resume (clean code, \
+                              returns via RTL, from a coroutine dispatcher). Add to bank{:02x}.cfg:", bank);
+                    println!("      func {}_R{:04X} {:04X} entry_mx:{},{}   # {} resume", sub, off, off, m, x, sub);
+                } else if src_is_rtl && p.looks_code && !terminates {
+                    println!("    VERDICT: SUSPICIOUS — clean code but no RTL/RTS in window; \
+                              may be a mid-routine landing (real stack/state bug), not a resume.");
+                } else if !p.looks_code {
+                    println!("    VERDICT: NOT CODE at this width — likely a genuine bad pointer / \
+                              wrong exit-mx (real bug), do NOT register.");
                 }
             }
         }
