@@ -1161,7 +1161,86 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
   }
 }
 
+// ── Per-scanline register-write log (beam-truthful mid-frame effects) ─────────
+// The recomp runs the CPU a whole frame, then presents from the FINAL register
+// state — losing mid-frame register changes (the intro window wipe's per-line BG
+// scroll, fades). We log whitelisted PPU register writes with the beam scanline
+// at write time; the game's per-line render loop replays them
+// (ppu_scanline_log_apply_upto up to line N before rendering line N). Every PPU
+// write — CPU and DMA — funnels through ppu_write, so this one hook captures both.
+// Gated on SF_SCANLINE_LOG (off = zero cost; the frame-level path is unchanged).
+typedef struct { uint16_t line; uint8_t adr; uint8_t val; } PpuScanlineWrite;
+#define PPU_SCANLINE_LOG_MAX 16384
+static PpuScanlineWrite g_ppu_slog[PPU_SCANLINE_LOG_MAX];
+static int g_ppu_slog_n = 0;
+static int g_ppu_slog_cursor = 0;
+static int g_ppu_slog_replaying = 0;
+static uint64_t g_ppu_slog_frame_start = 0;
+int g_ppu_scanline_log = -1;   // -1 = uninit; resolved from env on first ppu_write
+
+// Registers that can meaningfully change mid-frame. VRAM/OAM/CGRAM DATA ports are
+// bulk uploads set up before the frame — excluded so the log doesn't flood.
+static inline int ppu_reg_is_midframe(uint8_t adr) {
+  switch (adr) {
+    case 0x00:                                                   // INIDISP (fades/blank)
+    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0a: // BGMODE,MOSAIC,BG tilemap
+    case 0x0b: case 0x0c:                                        // BG char addr
+    case 0x0d: case 0x0e: case 0x0f: case 0x10:                  // BG1/2 H/V scroll
+    case 0x11: case 0x12: case 0x13: case 0x14:                  // BG3/4 H/V scroll
+    case 0x23: case 0x24: case 0x25:                             // window mask sel
+    case 0x26: case 0x27: case 0x28: case 0x29:                  // window positions
+    case 0x2a: case 0x2b:                                        // window logic
+    case 0x2c: case 0x2d: case 0x2e: case 0x2f:                  // screen enable / window mask
+    case 0x30: case 0x31: case 0x32:                             // color math (cgwsel,cgadsub,coldata)
+      return 1;
+    default: return 0;
+  }
+}
+
+static inline int ppu_scanline_cur_line(void) {
+  extern uint64_t g_master_cycles;
+  uint64_t d = g_master_cycles - g_ppu_slog_frame_start;
+  uint64_t line = d / 1364u;
+  return line > 261 ? 261 : (int)line;
+}
+
+// Reset the log for a new frame (call at the CPU-frame boundary / after replay).
+void ppu_scanline_log_reset(void) {
+  extern uint64_t g_master_cycles;
+  if (getenv("SF_SLOG_DEBUG") && g_ppu_slog_n > 0) {
+    int lo = 262, hi = -1;
+    for (int i = 0; i < g_ppu_slog_n; i++) {
+      int l = g_ppu_slog[i].line;
+      if (l < lo) lo = l; if (l > hi) hi = l;
+    }
+    static int s = 0;
+    if ((s++ % 30) == 0)
+      fprintf(stderr, "[slog] %d writes, lines %d..%d (cursor consumed %d)\n",
+              g_ppu_slog_n, lo, hi, g_ppu_slog_cursor);
+  }
+  g_ppu_slog_n = 0;
+  g_ppu_slog_cursor = 0;
+  g_ppu_slog_frame_start = g_master_cycles;
+}
+
+// Replay logged writes up to (and including) beam line `line`, before it renders.
+void ppu_scanline_log_apply_upto(Ppu *ppu, int line) {
+  g_ppu_slog_replaying = 1;
+  while (g_ppu_slog_cursor < g_ppu_slog_n && g_ppu_slog[g_ppu_slog_cursor].line <= line) {
+    PpuScanlineWrite *w = &g_ppu_slog[g_ppu_slog_cursor++];
+    ppu_write(ppu, w->adr, w->val);
+  }
+  g_ppu_slog_replaying = 0;
+}
+
+int ppu_scanline_log_count(void) { return g_ppu_slog_n; }
+
 void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
+  if (g_ppu_scanline_log < 0) g_ppu_scanline_log = getenv("SF_SCANLINE_LOG") ? 1 : 0;
+  if (g_ppu_scanline_log && !g_ppu_slog_replaying
+      && g_ppu_slog_n < PPU_SCANLINE_LOG_MAX && ppu_reg_is_midframe(adr))
+    g_ppu_slog[g_ppu_slog_n++] =
+        (PpuScanlineWrite){ (uint16_t)ppu_scanline_cur_line(), adr, val };
 //  if (adr != 24 && adr != 25)
 //    printf("ppu_write(%d, %d)\n", adr, val);
   switch(adr) {
