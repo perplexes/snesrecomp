@@ -95,6 +95,10 @@ static uint16_t g_sched_prev_scanline = 0;       /* scanline at end of last tick
 static int      g_sched_nmi_fired     = 0;       /* edge latch: VBlank processed this frame */
 static uint16_t g_sched_irq_scanline  = 0xFFFF;  /* scanline of last V-IRQ delivery */
 static uint16_t g_sched_hirq_scanline = 0xFFFF;  /* scanline of last H-IRQ delivery */
+static uint16_t g_ca_last_vtimer      = 0xFFFF;  /* cycle-accurate V-IRQ: last DELIVERED
+                                                  * vTimer value (master-beam clock). Set
+                                                  * only on actual delivery (after P.I
+                                                  * gating), reset per master-beam frame. */
 
 /* -- External symbols (defined elsewhere in the engine) -------------------- */
 
@@ -312,16 +316,75 @@ void sched_tick(uint32_t block_cost) {
             fflush(stderr);
         }
     }
+    /* -- Cycle-accurate beam baseline (Track B) ----------------------------
+     * Advance the master-beam crossing baseline EVERY tick, INDEPENDENT of the
+     * V-IRQ enable / pump / registration gate below, so a disabled or
+     * pump-occupied interval never folds stale beam time into the crossing
+     * comparison (a stale baseline would retroactively "cross" vTimer the
+     * instant V-IRQ is re-enabled). Only the FIRING decision is gated. The
+     * per-frame latch (g_ca_last_vtimer) is also re-armed here so it resets on
+     * the true master-beam frame boundary regardless of enable state. */
+    int      ca_active  = 0;   /* valid cycle-accurate baseline this tick */
+    int      ca_crossed = 0;   /* beam crossed the armed vTimer since last tick */
+    uint16_t ca_beam_sl = 0;
+    uint64_t ca_frame   = 0;
+    if (g_cycle_accurate) {
+        static uint16_t s_prev_beam_sl = 0;
+        static uint64_t s_prev_frame   = ~(uint64_t)0; /* sentinel: first tick */
+        uint64_t beam = g_master_cycles;
+        ca_frame   = beam / SCHED_CYCLES_PER_FRAME;
+        ca_beam_sl = (uint16_t)((beam / SCHED_CYCLES_PER_SCANLINE) % SCHED_TOTAL_SCANLINES);
+
+        int      first        = (s_prev_frame == ~(uint64_t)0);
+        int      wrapped      = !first && (ca_frame != s_prev_frame);
+        uint16_t prev_beam_sl = s_prev_beam_sl;
+        if (ca_frame != s_prev_frame) {
+            /* New (or first) master-beam frame: re-arm the once-per-frame latch
+             * and reset the crossing baseline to the top of frame. */
+            g_ca_last_vtimer = 0xFFFF;
+            prev_beam_sl     = 0;
+            s_prev_frame     = ca_frame;
+        }
+        uint16_t vt = g_snes ? g_snes->vTimer : 0xFFFF;
+        /* Only V-timer values 0..261 can be crossed in a 262-line frame; the
+         * 9-bit register's 262..511 range never matches (codex #5). */
+        if (vt < SCHED_TOTAL_SCANLINES) {
+            ca_crossed = (prev_beam_sl < vt && vt <= ca_beam_sl)
+                         || (prev_beam_sl == 0 && vt == 0 && ca_beam_sl == 0);
+            /* Coarse-tick fallback: if a whole frame elapsed since the last tick
+             * the armed line was necessarily crossed during it; guarantee one
+             * (approximate-position) delivery rather than lose the IRQ. */
+            if (wrapped) ca_crossed = 1;
+        }
+        s_prev_beam_sl = ca_beam_sl;   /* advance baseline every tick */
+        ca_active      = !first;       /* suppress the initialization tick's fire */
+    }
+
     if (g_snes && g_snes->vIrqEnabled && !g_in_coop_pump && g_coop_irq_pump) {
         uint16_t vtimer = g_snes->vTimer;
         int irq_edge = 0;
 
-        if (frames_crossed > 0) {
+        if (g_cycle_accurate) {
+            /* -- Track B: beam-truthful V-IRQ (SF_CYCLE_ACCURATE) --------------
+             * Fire on each forward crossing of the CURRENTLY armed vTimer
+             * (baseline tracked above, every tick), latched by the DELIVERED
+             * vTimer VALUE (g_ca_last_vtimer, set in the fire block AFTER P.I
+             * gating so a masked crossing is not consumed; reset per master-beam
+             * frame). Thus:
+             *   - a constant vTimer fires exactly ONCE per frame (hardware
+             *     V-IRQ: one beam crossing of the target line);
+             *   - a mid-frame re-arm to a NEW forward line fires again this
+             *     frame when the beam reaches that line;
+             *   - a backward re-arm (already-passed line) fires next frame.
+             * Replaces the once-per-frame g_sched_irq_scanline behaviour for the
+             * multi-phase chain that re-arms vTimer between phases. */
+            irq_edge = ca_active && ca_crossed && (vtimer != g_ca_last_vtimer);
+        } else if (frames_crossed > 0) {
             /* Wrapped -- IRQ target was somewhere in the frame we wrapped through.
              * Fire if target is in [0, scanline] (already passed in new frame)
              * or if it was in [prev_sl, TOTAL-1] (passed in old frame). Either
              * way, fire once now (edge-latch below prevents duplicates). */
-            irq_edge = 1;
+            irq_edge = (vtimer != g_sched_irq_scanline);
         } else {
             /* Normal forward crossing: prev_sl < vtimer <= scanline. */
             irq_edge = (prev_sl < vtimer && vtimer <= scanline);
@@ -331,10 +394,17 @@ void sched_tick(uint32_t block_cost) {
             if (!irq_edge && prev_sl == 0 && vtimer == 0) {
                 irq_edge = 1;
             }
+            irq_edge = irq_edge && (vtimer != g_sched_irq_scanline);
         }
 
-        if (irq_edge && vtimer != g_sched_irq_scanline && !g_cpu._flag_I) {
-            g_sched_irq_scanline = vtimer;  /* latch: one IRQ per vTimer crossing per frame */
+        if (irq_edge && !g_cpu._flag_I) {
+            g_sched_irq_scanline = vtimer;  /* legacy latch: one IRQ per vTimer crossing per frame */
+            g_ca_last_vtimer     = vtimer;  /* cycle-accurate latch: consume the armed vTimer on delivery */
+
+            if (g_cycle_accurate && getenv("SF_SCHED_TRACE")) {
+                fprintf(stderr, "[virq-ca] fire beam_sl=%u vtimer=%u frame=%llu\n",
+                        ca_beam_sl, vtimer, (unsigned long long)ca_frame);
+            }
 
             /* $4211 bit 7 (inIrq): set before handler, hardware clears on $4211
              * read. Set it here; the game's $4211 read-clear path in the

@@ -1207,16 +1207,12 @@ static inline int ppu_scanline_cur_line(void) {
 // Reset the log for a new frame (call at the CPU-frame boundary / after replay).
 void ppu_scanline_log_reset(void) {
   extern uint64_t g_master_cycles;
-  if (getenv("SF_SLOG_DEBUG") && g_ppu_slog_n > 0) {
-    int lo = 262, hi = -1;
-    for (int i = 0; i < g_ppu_slog_n; i++) {
-      int l = g_ppu_slog[i].line;
-      if (l < lo) lo = l; if (l > hi) hi = l;
-    }
+  if (getenv("SF_SLOG_DEBUG")) {
+    uint64_t delta = g_master_cycles - g_ppu_slog_frame_start;
     static int s = 0;
     if ((s++ % 30) == 0)
-      fprintf(stderr, "[slog] %d writes, lines %d..%d (cursor consumed %d)\n",
-              g_ppu_slog_n, lo, hi, g_ppu_slog_cursor);
+      fprintf(stderr, "[slog] master delta this present = %llu (%.1f beam-frames; 1 frame=357368), %d writes\n",
+              (unsigned long long)delta, (double)delta / 357368.0, g_ppu_slog_n);
   }
   g_ppu_slog_n = 0;
   g_ppu_slog_cursor = 0;
