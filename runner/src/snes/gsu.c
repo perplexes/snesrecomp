@@ -1103,6 +1103,12 @@ void gsu_run(Gsu* g, int maxCycles) {
   while (gsu_is_running(g) && cycles < maxCycles) {
     cycles += gsu_step(g);
   }
+  /* Cycle-accurate mode: the recomp runs the GSU synchronously (instantly), so
+   * the CPU never spins waiting for it — charge the GSU's run duration to the
+   * master clock so the beam advances by the real GSU time. GSU1 (Star Fox) runs
+   * at ~10.7 MHz = half the 21.4 MHz master, so 1 GSU cycle ~= 2 master. */
+  { extern uint64_t g_master_cycles; extern int g_cycle_accurate;
+    if (g_cycle_accurate) g_master_cycles += (uint64_t)cycles * 2u; }
   // GSU_DUMP_RAM=N: after the first run that plots >= N pixels, dump the full
   // Game Pak RAM and log SCBR/RAMBR/SCMR so we can locate the rendered back
   // buffer and compare it to the VRAM transfer source.
