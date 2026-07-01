@@ -913,7 +913,7 @@ pub fn emit_bank(
         aliased.insert(name.clone());
         any_alias = true;
         parts.push(format!(
-            "void {name}(CpuState *cpu) {{\n  RecompReturn _r = {name}{suffix}(cpu);\n  if (_r != RECOMP_RETURN_NORMAL) {{\n    fprintf(stderr,\n      \"[recomp] non-local-return SKIP_%d leaked past void alias %s\\n\",\n      (int)_r, \"{name}\");\n    abort();\n  }}\n}}"
+            "void {name}(CpuState *cpu) {{\n  RecompReturn _r = {name}{suffix}(cpu);\n  if (_r != RECOMP_RETURN_NORMAL) {{\n    fprintf(stderr,\n      \"[recomp] non-local-return SKIP_%d leaked past void alias %s\\n\"\n      \"[recomp]   TRIAGE: often an UNREGISTERED manufactured-RTL coroutine resume\\n\"\n      \"[recomp]   (an RTL to a computed target whose func entry is missing -> the\\n\"\n      \"[recomp]   ancestor-skip over-resolves and leaks). Re-run with SF_DUMP_MISSES=/tmp/m.txt,\\n\"\n      \"[recomp]   then: chase-misses /tmp/m.txt --explain --rom <game>.sfc --cfg-dir recomp\\n\"\n      \"[recomp]   and add any 'REGISTERABLE' target to its bank cfg, then regen.\\n\",\n      (int)_r, \"{name}\");\n    abort();\n  }}\n}}"
         ));
     }
     if any_alias {
