@@ -26,6 +26,10 @@ name = "dump-emit"
 path = "src/bin/dump_emit.rs"
 
 [[bin]]
+name = "dump-snippet"
+path = "src/bin/dump_snippet.rs"
+
+[[bin]]
 name = "dump-autoroute"
 path = "src/bin/dump_autoroute.rs"
 

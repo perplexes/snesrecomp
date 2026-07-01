@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""phase_b.py — differential fuzz: run a 65816 snippet through the recomp's v2
+"""phase_b.py — differential fuzz: run a 65816 snippet through the recomp's
 codegen AND the bsnes-plus oracle, diff the final CPU state.
 
 Closes the loop the project planned but never reached (PHASE_B_DIFFERENTIAL_FUZZ):
-  * recomp side — lower+emit the snippet via v2.codegen, wrap in a C harness that
-    #includes the REAL runner headers (cpu_state.h / cpu_trace.h) so the actual
-    width helpers and cpu_p_to_mirrors are under test — not a hand-maintained
-    copy (the copy is how the index-high-byte bug hid). Only the memory backend
-    and trace hooks are stubbed (flat g_ram / no-ops). gcc, not MSVC.
+  * recomp side — lower+emit the snippet via the RUST codegen (dump-snippet, the
+    shipping engine), wrap in a C harness that #includes the REAL runner headers
+    (cpu_state.h / cpu_trace.h) so the actual width helpers and cpu_p_to_mirrors
+    are under test — not a hand-maintained copy (the copy is how the
+    index-high-byte bug hid). Only the memory backend and trace hooks are stubbed
+    (flat g_ram / no-ops). gcc.
   * oracle side — bsnes_oracle.run_oracle (synthetic ROM, deterministic WRAM).
-  * differ — compare A/X/Y/D/DB + m/x (S omitted; the prologue/harness seed it
-    differently). Any divergence is a codegen/runtime bug.
+  * differ — compare A/X/Y/DB + P/m/x. Any divergence is a codegen/runtime bug.
 
 Usage: python phase_b.py            # runs the built-in regression corpus
 """
@@ -19,62 +19,40 @@ import os, sys, subprocess, tempfile, pathlib, re
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 RUNNER_SRC = REPO / "runner" / "src"
-sys.path.insert(0, str(REPO / "recompiler"))
+DUMP_SNIPPET = REPO / "recompiler-rs" / "target" / "release" / "dump-snippet"
 sys.path.insert(0, str(REPO / "fuzz"))
-import snes65816 as s65                       # noqa: E402
-from v2 import lowering, codegen              # noqa: E402
 import bsnes_oracle                           # noqa: E402
 
 
 def emit_snippet_body(rom: bytes, m0: int, x0: int) -> list[str]:
-    """Lower+emit one straight-line snippet via v2 codegen, tracking M/X."""
-    lines, off, pc, m, x = [], 0, 0x8000, m0, x0
-    counter = [0]
-    def vf():
-        from v2.ir import Value
-        counter[0] += 1
-        return Value(vid=counter[0])
-    while off < len(rom):
-        insn = s65.decode_insn(rom, off, pc, 0, m=m, x=x)
-        if insn is None:
-            raise ValueError(f"decode fail at off {off} byte {rom[off]:#04x}")
-        insn.m_flag, insn.x_flag = m, x
-        for op in lowering.lower(insn, value_factory=vf):
-            lines.extend(codegen.emit_op(op))
-        if insn.mnem == "REP":
-            if insn.operand & 0x20: m = 0
-            if insn.operand & 0x10: x = 0
-        elif insn.mnem == "SEP":
-            if insn.operand & 0x20: m = 1
-            if insn.operand & 0x10: x = 1
-        off += insn.length; pc = (pc + insn.length) & 0xFFFF
-    return lines
+    """Emit one straight-line snippet's C body via the RUST codegen (dump-snippet),
+    so the fuzzer tests the shipping engine. Byte-identical to the retired Python
+    emit_snippet_body."""
+    r = subprocess.run([str(DUMP_SNIPPET), "--bytes", rom.hex(), "--m", str(m0), "--x", str(x0)],
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise ValueError(f"dump-snippet failed: {r.stderr.strip()[:200]}")
+    return r.stdout.splitlines()
 
+
+class _MetaInsn:
+    __slots__ = ("mnem", "mode", "m_flag", "x_flag")
+    def __init__(self, mnem, mode, m, x):
+        self.mnem, self.mode, self.m_flag, self.x_flag = mnem, mode, m, x
 
 def decode_snippet(rom: bytes, m0: int, x0: int):
-    """Decode a straight-line snippet into the insn list (m/x tracked)."""
-    insns, off, pc, m, x = [], 0, 0x8000, m0, x0
-    while off < len(rom):
-        insn = s65.decode_insn(rom, off, pc, 0, m=m, x=x)
-        if insn is None:
-            raise ValueError(f"decode fail at off {off} byte {rom[off]:#04x}")
-        insn.m_flag, insn.x_flag = m, x
-        insns.append(insn)
-        if insn.mnem == "REP":
-            if insn.operand & 0x20: m = 0
-            if insn.operand & 0x10: x = 0
-        elif insn.mnem == "SEP":
-            if insn.operand & 0x20: m = 1
-            if insn.operand & 0x10: x = 1
-        off += insn.length; pc = (pc + insn.length) & 0xFFFF
-    return insns
-
-def recomp_cycle_estimate(snippet: bytes, init: dict) -> int:
-    """The recomp's CPU-cycle estimate for the snippet (sum of the cycle table,
-    under its stated assumptions: DP.low=0, no page-cross, no taken branch)."""
-    from v2.cycle_tables import estimate_cycles
-    return sum(estimate_cycles(i) for i in
-               decode_snippet(snippet, init.get("m", 0), init.get("x", 0)))
+    """Decode a straight-line snippet into lightweight insn records (mnem, mode,
+    m_flag, x_flag) via the RUST decoder (dump-snippet --meta). Feeds the coverage
+    ledger without a Python decoder."""
+    r = subprocess.run([str(DUMP_SNIPPET), "--bytes", rom.hex(), "--m", str(m0),
+                        "--x", str(x0), "--meta"], capture_output=True, text=True)
+    if r.returncode:
+        raise ValueError(f"dump-snippet --meta failed: {r.stderr.strip()[:200]}")
+    out = []
+    for ln in r.stdout.splitlines():
+        mnem, mode, m, x = ln.split("|")
+        out.append(_MetaInsn(mnem, mode, int(m), int(x)))
+    return out
 
 
 HARNESS = r"""
