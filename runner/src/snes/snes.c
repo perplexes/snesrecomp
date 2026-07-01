@@ -441,7 +441,12 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
         // observes no active channel), so it does not represent real bus time:
         // drop it to avoid a +2-cycle overcharge per MDMA trigger.
         if (dma_steps) dma_steps--;
-        { extern uint64_t g_pending_cycles; g_pending_cycles += (uint64_t)dma_steps * 2u; }
+        { extern uint64_t g_pending_cycles; g_pending_cycles += (uint64_t)dma_steps * 2u;
+          /* Also charge the accurate master clock (cycle-accurate mode): the CPU
+           * is halted during DMA, so the beam advances by exactly this. Without
+           * this the master-derived OPVCT/OPHCT beam lags every DMA. */
+          extern uint64_t g_master_cycles; extern int g_cycle_accurate;
+          if (g_cycle_accurate) g_master_cycles += (uint64_t)dma_steps * 2u; }
       }
       break;
     }
