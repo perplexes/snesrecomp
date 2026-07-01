@@ -211,6 +211,72 @@ fn cfg_funcs(cfg_path: &Path) -> Vec<(String, u32)> {
     out
 }
 
+/// Static resume-table enumeration: find manufactured-RTL sites in a bank (an
+/// `ADC #imm16` that feeds a `PHA` before an `RTL` — the computed-pointer idiom),
+/// then scan the bank for the state immediates (`LDA #imm16`) whose computed entry
+/// `imm + base + 1` is a clean RTL-terminated resume NEAR an already-registered
+/// resume (the cluster anchor). Emits a `func` line for every sibling not yet
+/// registered — so the whole resume table is registered at compile time and the
+/// unregistered-resume SKIP-leak crash becomes structurally impossible.
+fn enumerate_resumes(rom: &[u8], cfg_dir: &str, banks: &[u32]) {
+    for &bank in banks {
+        let base_off = ((bank & 0x7F) as usize) * 0x8000;
+        if base_off + 0x8000 > rom.len() { continue; }
+        let seg = &rom[base_off..base_off + 0x8000];
+        // 1. manufactured-RTL bases: ADC #imm16 (69 lo hi) then PHA (48) then RTL (6b)
+        let mut bases: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for i in 0..seg.len().saturating_sub(3) {
+            if seg[i] == 0x69 {
+                let imm = seg[i + 1] as u32 | (seg[i + 2] as u32) << 8;
+                if imm < 0x8000 { continue; }               // base must land the target in ROM ($8000+)
+                let (mut pha, mut rtl) = (false, false);
+                for j in 3..22 {
+                    match seg.get(i + j) {
+                        Some(0x48) => pha = true,
+                        Some(0x6b) if pha => { rtl = true; break; }
+                        _ => {}
+                    }
+                }
+                if pha && rtl { bases.insert(imm); }
+            }
+        }
+        if bases.is_empty() { continue; }
+        // registered resume entries in this bank (the cluster anchors)
+        let cfg = format!("{}/bank{:02x}.cfg", cfg_dir, bank);
+        let registered: std::collections::BTreeSet<u32> =
+            cfg_funcs(Path::new(&cfg)).into_iter().map(|(_, o)| o).collect();
+        // 2. scan for LDA #imm16 (A9 lo hi) state-setters -> resume entries
+        let mut found: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for &base in &bases {
+            for i in 0..seg.len().saturating_sub(2) {
+                if seg[i] != 0xA9 { continue; }
+                let imm = seg[i + 1] as u32 | (seg[i + 2] as u32) << 8;
+                let entry = imm.wrapping_add(base).wrapping_add(1) & 0xFFFF;
+                if !(0x8000..=0xFFFF).contains(&entry)
+                    || registered.contains(&entry) || found.contains_key(&entry) { continue; }
+                // cluster anchor: entry must be close to a registered resume (±$100)
+                if !registered.iter().any(|&r| entry.abs_diff(r) <= 0x100) { continue; }
+                let p = decode_probe(rom, bank, entry, 1, 0);   // resume entry_mx:1,0
+                if p.looks_code && p.returns_in.is_some() {
+                    found.insert(entry, base);
+                }
+            }
+        }
+        if !found.is_empty() {
+            println!("== bank{:02X}: {} manufactured-RTL base(s), {} statically-visible NEW resume(s) ==",
+                     bank, bases.len(), found.len());
+            for (entry, base) in &found {
+                println!("  func STRAT_R{:04X} {:04X} entry_mx:1,0   # enumerated: LDA #imm -> ${:04X}=imm+${:04X}+1, RTL-terminated",
+                         entry, entry, entry, base);
+            }
+        }
+    }
+    eprintln!("NOTE: static enumeration only sees resume offsets set by a literal `LDA #imm`. \
+               Offsets that are RUNTIME state values (loaded from RAM / a data table — e.g. Star Fox's \
+               $9DC5 $04B0=$455D -> $E97E) are invisible here. For COMPLETE coverage use the runtime \
+               classifier on real misses (chase-misses --explain) or the oracle-reachability audit.");
+}
+
 /// Strip a `_R<hex>` resume suffix to get the base strat name.
 fn strat_base(name: &str) -> &str {
     name.rsplit_once("_R")
@@ -231,6 +297,19 @@ fn main() {
     let apply = args.contains(&"--apply".to_string());
     let explain = args.contains(&"--explain".to_string());
     let rom_path = flag_val(&args, "--rom");
+
+    // --enum-resumes: proactively enumerate manufactured-RTL resume tables and
+    // print every unregistered sibling, so the resume set is complete before any
+    // run (structurally prevents the unregistered-resume SKIP-leak crash class).
+    if args.contains(&"--enum-resumes".to_string()) {
+        let rom = rom_path.as_ref().and_then(|p| load_rom(p).ok())
+            .expect("--enum-resumes requires --rom <game.sfc>");
+        let banks: Vec<u32> = flag_val(&args, "--banks")
+            .map(|s| s.split(',').filter_map(|b| u32::from_str_radix(b.trim(), 16).ok()).collect())
+            .unwrap_or_else(|| (0..0x40).collect());
+        enumerate_resumes(&rom, &cfg_dir, &banks);
+        return;
+    }
 
     // Strat-family symbol allowlist: same pattern as Python's STRAT_NAME_RE.
     // re.IGNORECASE → (?i); ^ and $ in alternation match start/end of text.
