@@ -28,6 +28,7 @@
  */
 
 #include "cpu_state.h"
+#include "common_cpu_infra.h"
 #include "common_rtl.h"
 #include "cpu_trace.h"
 
@@ -222,6 +223,7 @@ static void cpu_hw_log(uint16 addr, int is_read, uint16 val) {
 }
 
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
+    cpu_master_data(bank, addr, 1);
     if ((addr == 0x4218 || addr == 0x4219) && 0) {
         static int n = 0;
         if (n++ < 20) fprintf(stderr, "[joyrd8] addr=%04x DB=%02x ramoff=%d hwreg=%d\n",
@@ -249,6 +251,7 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
+    cpu_master_data(bank, addr, 2);
     if ((addr == 0x4218 || addr == 0x4219) && 0) {
         static int n = 0;
         if (n++ < 20) fprintf(stderr, "[joyrd16] addr=%04x DB=%02x ramoff=%d hwreg=%d\n",
@@ -276,6 +279,7 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
+    cpu_master_data(bank, addr, 1);
     if ((addr == 0x1290 || addr == 0x1292) && v && getenv("SF_DBG_JOYRD")) {
         static int n = 0;
         if (n++ < 60) fprintf(stderr, "[cont0wr] addr=%04x DB=%02x val=%02x\n", addr, bank, v);
@@ -309,6 +313,7 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
 }
 
 void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
+    cpu_master_data(bank, addr, 2);
     if (addr == 0x12c3 && getenv("SF_DBG_PLAYPT")) {
         static int n = 0;
         if (n++ < 80) fprintf(stderr, "[playpt16] addr=%04x DB=%02x val=%04x\n", addr, bank, v);
@@ -606,6 +611,20 @@ RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc24,
                 "[state] tgt=$%06X from=$%06X  A=%04X X=%04X Y=%04X S=%04X D=%04X DB=%02X PB=%02X m=%d x=%d  ram[$%04X]=%04X\n",
                 pc24, source_pc24, cpu->A, cpu->X, cpu->Y, cpu->S, cpu->D, cpu->DB, cpu->PB,
                 cpu->m_flag, cpu->x_flag, s_wa, w);
+        }
+    }
+    /* SF_MASTER_AT=<hex24>: dump the master-cycle counter when a dispatch first
+     * reaches this PC — parity-check vs bsnes master cycles (regtrace V/H/F) with
+     * SF_CYCLE_ACCURATE=1 on the same ROM. */
+    {
+        static int s_ma = -1; static uint32_t s_mpc = 0; static int s_done = 0;
+        if (s_ma < 0) { const char *e = getenv("SF_MASTER_AT");
+            s_ma = e ? 1 : 0; if (e) s_mpc = (uint32)strtoul(e, NULL, 16) & 0xFFFFFFu; }
+        if (s_ma && !s_done && (pc24 & 0xFFFFFFu) == s_mpc) {
+            s_done = 1;
+            extern uint64_t g_master_cycles; extern int g_cycle_accurate;
+            fprintf(stderr, "[master] pc=$%06X master=%llu (accurate=%d)\n",
+                    pc24, (unsigned long long)g_master_cycles, g_cycle_accurate);
         }
     }
     /* SF_TRACE_BOOT: temporary boot-flow probe — log the first N cross-function

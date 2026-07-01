@@ -700,7 +700,11 @@ pub fn emit_function(
         src.push("    WatchdogCheck();".to_string());
         let blk_cyc: u32 = cfg.blocks[key].insns.iter().map(|d| estimate_cycles(&d.insn)).sum();
         if blk_cyc != 0 {
-            src.push(format!("    cpu_cycle_tick(cpu, {blk_cyc});"));
+            // Master-cycle-accurate fetch penalty: every code byte is fetched at
+            // the code region's speed. Star Fox is slowROM and its reloc code is
+            // WRAM (both slow, 8 master) so every fetch is +2 over the 6 baseline.
+            let blk_bytes: u32 = cfg.blocks[key].insns.iter().map(|d| d.insn.length as u32).sum();
+            src.push(format!("    cpu_cycle_tick(cpu, {blk_cyc}, {});", 2 * blk_bytes));
         }
         for ln in &block_lines[bi].1 {
             if ln.trim_start().starts_with("return") {

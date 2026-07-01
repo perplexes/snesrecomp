@@ -341,13 +341,28 @@ GsuFrameDoneFunc g_gsu_frame_done; /* game-registered GSU/coproc frame presenter
 DmaSuppressFunc g_dma_suppress;    /* game-registered MDMAEN channel suppressor */
 int g_in_coop_pump;               /* reentrancy guard (pump runs recompiled code) */
 
-/* Cycle-faithful clock accumulator. The recompiler emits cpu_cycle_tick(cpu, N)
- * per block; we sum here and WatchdogCheck() flushes the real total into
- * sched_tick() (replacing the old fixed-cost heuristic). */
+/* Cycle-faithful clock accumulator. The recompiler emits
+ * cpu_cycle_tick(cpu, cpu_cycles, fetch_penalty) per block; we sum here and
+ * WatchdogCheck() flushes the real total into sched_tick().
+ *
+ * MASTER-CYCLE-ACCURATE mode (g_cycle_accurate): the proportional CPU-cycle
+ * estimate feeds the scheduler as before, AND we accumulate an EXACT master
+ * cycle count in g_master_cycles: every CPU cycle is >= 6 master, plus the
+ * slow-access penalties. Per block the codegen passes fetch_penalty =
+ * block_bytes * (fetch_speed - 6) [statically known from the block's bank];
+ * the memory accessors add the per-data-access penalty (cpu_master_access).
+ * Off by default (zero cost); flipped on for cycle chasing / beam accuracy. */
 uint64_t g_pending_cycles = 0;
-void cpu_cycle_tick(struct CpuState *cpu, uint32_t n) {
+uint64_t g_master_cycles  = 0;
+int      g_cycle_accurate = 0;
+__attribute__((constructor)) static void cycle_accurate_init(void) {
+  const char *e = getenv("SF_CYCLE_ACCURATE");
+  g_cycle_accurate = (e && e[0] && e[0] != '0') ? 1 : 0;
+}
+void cpu_cycle_tick(struct CpuState *cpu, uint32_t n, uint32_t fetch_penalty) {
   (void)cpu;
   g_pending_cycles += n;
+  if (g_cycle_accurate) g_master_cycles += (uint64_t)6 * n + fetch_penalty;
 }
 
 void WatchdogFrameStart(void) {

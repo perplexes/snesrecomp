@@ -36,7 +36,37 @@ void WatchdogFrameStart(void);
  * unused today (kept for ABI symmetry / future per-CPU clocks). */
 struct CpuState;
 extern uint64_t g_pending_cycles;
-void cpu_cycle_tick(struct CpuState *cpu, uint32_t n);
+/* Master-cycle-accurate accounting (g_cycle_accurate on): exact master-cycle
+ * counter fed by the tick's 6*n baseline + fetch penalty, plus per-access
+ * penalties from the memory accessors. Off by default. */
+extern uint64_t g_master_cycles;
+extern int      g_cycle_accurate;
+void cpu_cycle_tick(struct CpuState *cpu, uint32_t n, uint32_t fetch_penalty);
+
+/* Master-cycle penalty (over the 6-cycle-per-access baseline) for one byte at
+ * (bank,addr), per the SNES access map: fast MMIO ($2000-3FFF, $4200-5FFF) = 0;
+ * WRAM (slow), SRAM, ROM = +2; manual-joypad ($4000-41FF, xslow) = +6. */
+static inline int cpu_access_pen_per_byte(uint8_t bank, uint16_t addr) {
+  if (bank == 0x7E || bank == 0x7F) return 2;   /* WRAM (slow) */
+  uint8_t lo = (uint8_t)(bank & 0x7F);          /* fold $80-$BF -> $00-$3F system mirror */
+  if (lo <= 0x3F) {
+    if (addr < 0x2000) return 2;                /* WRAM low mirror (slow) */
+    if (addr < 0x4000) return 0;                /* $2000-3FFF fast MMIO */
+    if (addr < 0x4200) return 6;                /* $4000-41FF joypad (xslow) */
+    if (addr < 0x6000) return 0;                /* $4200-5FFF fast MMIO */
+    return 2;                                   /* $6000-FFFF SRAM/ROM (slow) */
+  }
+  return 2;                                     /* $40-$7D, $C0-$FF ROM (slow) */
+}
+
+/* Add the data-access master penalty (bytes * per-byte penalty) when accurate.
+ * The memory accessors call this; the 6-per-cycle baseline comes from the tick. */
+static inline void cpu_master_data(uint8_t bank, uint16_t addr, int bytes) {
+  extern uint64_t g_master_cycles;
+  extern int g_cycle_accurate;
+  if (g_cycle_accurate)
+    g_master_cycles += (uint64_t)bytes * cpu_access_pen_per_byte(bank, addr);
+}
 
 /* Cooperative IRQ pump hook (game-agnostic). Some games spin-wait on RAM
  * flags that ONLY advance inside an interrupt handler (e.g. a vblank/raster
